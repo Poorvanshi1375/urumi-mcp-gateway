@@ -1,0 +1,16 @@
+node_modules/
+.env
+.env.*
+*.log
+*.pid
+*.tgz
+dist/
+# local secret overrides for Helm, never commit
+*.secret.yaml
+values-*.secret.yaml
+
+# local design notes (Stitch prompts etc.), not part of the submission
+docs/design/
+
+# internal working notes (plan, assignment copy, handoff, progress), never committed
+docs/internal/

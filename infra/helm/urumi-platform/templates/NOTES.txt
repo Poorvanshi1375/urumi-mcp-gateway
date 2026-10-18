@@ -1,0 +1,8 @@
+Postgres: {{ include "urumi-platform.postgresHost" . }}.{{ .Release.Namespace }}.svc.cluster.local:5432 (db {{ .Values.postgres.database }}, user {{ .Values.postgres.user }})
+Gateway: http://{{ .Values.platform.ingress.host }}/mcp  (local k3d: http://localhost:9080/mcp)
+Admin CLI:
+  kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "urumi-platform.fullname" . }} -- node src/cli.ts
+Migration log (init container):
+  kubectl logs -n {{ .Release.Namespace }} deploy/{{ include "urumi-platform.fullname" . }} -c migrate
+Applied migrations:
+  kubectl exec -n {{ .Release.Namespace }} {{ include "urumi-platform.postgresHost" . }}-0 -- sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select id, hash, created_at from drizzle.__drizzle_migrations"'

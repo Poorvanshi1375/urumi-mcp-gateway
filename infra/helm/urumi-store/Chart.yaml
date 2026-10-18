@@ -1,0 +1,7 @@
+
+apiVersion: v2
+name: urumi-store
+description: WordPress and WooCommerce store for the Urumi MCP Gateway assignment
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

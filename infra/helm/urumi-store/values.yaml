@@ -1,0 +1,110 @@
+nameOverride: store            # resources: <release>-store-*, or just store-* for release "store"
+fullnameOverride: ""
+
+# Public identity of the store. homeUrl must be the exact URL browsers use (scheme, host
+# and port): WordPress redirects to it and WooCommerce signs OAuth 1.0a over it.
+store:
+  host: store.localhost
+  homeUrl: ""              # default http://<host>; local k3d uses http://store.localhost:9080
+  title: Urumi Store
+  adminUser: admin
+  adminEmail: admin@example.com
+  country: "IN:KA"
+  currency: INR
+  timezone: Asia/Kolkata   # WordPress timezone: "orders today" for the agent and admins means today in India
+  # Seeded once per SKU by the setup Job (idempotent).
+  seedProducts:
+    - { sku: URUMI-TSHIRT, name: "Urumi T-Shirt", price: "499" }
+    - { sku: URUMI-MUG, name: "Urumi Coffee Mug", price: "299" }
+    - { sku: URUMI-HOODIE, name: "Urumi Hoodie", price: "1499" }
+    - { sku: URUMI-CAP, name: "Urumi Cap", price: "399" }
+    - { sku: URUMI-STICKERS, name: "Urumi Sticker Pack", price: "99" }
+
+woocommerce:
+  version: "11.2.1"
+  # The setup Job creates/updates one read_write REST key with this description.
+  apiKeyDescription: urumi-mcp
+
+# Credentials come from a Secret this chart never creates, so no secret value is ever in values
+# or in Helm's release history. scripts/secrets.sh creates it (keys: mysql-root-password,
+# mysql-password, wp-admin-password, woo-consumer-key, woo-consumer-secret). Required.
+secrets:
+  existingSecret: ""
+
+wordpress:
+  runAsUser: 33        # www-data in the Apache image; also used for the WP-CLI setup Job (its image's www-data is 82)
+  image:
+    repository: wordpress
+    tag: "7.1.3-php8.3-apache"
+    pullPolicy: IfNotPresent
+  service:
+    port: 80
+    # Extra Service ports that also target :80. Local k3d needs 9080 so in-cluster
+    # clients can connect to the same host:port as the signed home URL.
+    extraPorts: []
+  persistence:
+    size: 2Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 768Mi
+
+mysql:
+  runAsUser: 999       # the mysql user of the mysql:8.4 image
+  image:
+    repository: mysql
+    tag: "8.4"
+    pullPolicy: IfNotPresent
+  database: wordpress
+  user: wordpress
+  # Saves ~200 MB RAM on a 16 GB laptop; nothing in the store needs performance_schema.
+  extraArgs:
+    - --performance-schema=OFF
+  persistence:
+    size: 5Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 768Mi
+
+# WP-CLI Job (Helm post-install/post-upgrade hook) that installs and configures the store.
+setup:
+  image:
+    repository: wordpress
+    tag: "cli-2.12.0-php8.3"   # tag tracks WP-CLI, not WordPress; core comes from the shared PVC
+    pullPolicy: IfNotPresent
+  backoffLimit: 2
+  activeDeadlineSeconds: 900
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+# All pods of this release are default-deny for ingress. WordPress accepts only the Ingress
+# controller and the WooCommerce REST clients listed here; MySQL only WordPress and the setup Job.
+networkPolicy:
+  ingressController:
+    namespace: kube-system
+    podLabels: { app.kubernetes.io/name: traefik }      # k3s / k3d Traefik
+  storeApiClients:
+    - podLabels: { app: woo-mcp, app.kubernetes.io/instance: platform }   # namespace: defaults to this release's
+
+ingress:
+  enabled: true
+  className: traefik
+  annotations: {}
+  tls:
+    enabled: false
+    secretName: ""      # default <release>-store-tls
+    redirectHttp: false # Traefik only: redirect http:// to https://

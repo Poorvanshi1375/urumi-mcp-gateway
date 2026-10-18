@@ -1,0 +1,8 @@
+Store: {{ include "urumi-store.homeUrl" . }}
+Admin: {{ include "urumi-store.homeUrl" . }}/wp-admin  (user: {{ .Values.store.adminUser }})
+
+Admin password:
+  kubectl get secret -n {{ .Release.Namespace }} {{ include "urumi-store.secretName" . }} -o jsonpath='{.data.wp-admin-password}' | base64 -d; echo
+
+Setup log:
+  kubectl logs -n {{ .Release.Namespace }} job/{{ include "urumi-store.fullname" . }}-setup

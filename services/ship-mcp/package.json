@@ -1,0 +1,14 @@
+{
+  "name": "urumi-ship-mcp",
+  "private": true,
+  "type": "module",
+  "description": "Shipping MCP server (Streamable HTTP, cluster-internal): our second upstream, with a tool name that deliberately collides with woo-mcp (get_order).",
+  "engines": { "node": ">=24" },
+  "scripts": { "start": "node src/server.ts" },
+  "dependencies": {
+    "@modelcontextprotocol/node": "2.1.1",
+    "@modelcontextprotocol/server": "2.3.1",
+    "fastify": "5.12.5",
+    "zod": "4.6.5"
+  }
+}

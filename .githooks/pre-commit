@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Refuse a commit that adds a secret. Enabled by `make hooks` (git config core.hooksPath .githooks).
+# Adds the cluster's live Secret values to the check when kubectl can reach the cluster.
+cd "$(git rev-parse --show-toplevel)" || exit 1
+if kubectl get ns "${NS:-urumi}" --request-timeout=3s >/dev/null 2>&1; then
+  exec scripts/check-secrets.sh --live
+fi
+exec scripts/check-secrets.sh

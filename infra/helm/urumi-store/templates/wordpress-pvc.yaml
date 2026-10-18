@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "urumi-store.fullname" . }}-wordpress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "urumi-store.componentLabels" (dict "ctx" . "component" "wordpress") | nindent 4 }}
+  annotations:
+    # Keep wp-content (uploads, plugins) on uninstall, like the MySQL PVC.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.wordpress.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.wordpress.persistence.size }}

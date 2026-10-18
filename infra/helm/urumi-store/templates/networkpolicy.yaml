@@ -1,0 +1,49 @@
+{{- /*
+Default deny: no pod of this release accepts traffic unless a policy below (or mysql-networkpolicy.yaml)
+allows it. Only this release's pods are selected, so the policy never affects another chart.
+*/}}
+{{- $np := .Values.networkPolicy }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "urumi-store.fullname" . }}-default-deny
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "urumi-store.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: ["Ingress"]
+---
+# WordPress accepts the Ingress controller (the storefront and wp-admin) and the WooCommerce REST
+# clients (our woo-mcp). Nothing else in the cluster can reach it directly.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "urumi-store.fullname" . }}-wordpress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "urumi-store.componentLabels" (dict "ctx" . "component" "wordpress") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "urumi-store.componentSelector" (dict "ctx" . "component" "wordpress") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ $np.ingressController.namespace }} }
+          podSelector:
+            matchLabels:
+              {{- toYaml $np.ingressController.podLabels | nindent 14 }}
+        {{- range $np.storeApiClients }}
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ .namespace | default $.Release.Namespace }} }
+          podSelector:
+            matchLabels:
+              {{- toYaml .podLabels | nindent 14 }}
+        {{- end }}
+      ports:
+        - port: 80
+          protocol: TCP

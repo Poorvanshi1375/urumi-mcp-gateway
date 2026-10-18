@@ -1,0 +1,38 @@
+{{- $p := .Values.platform }}
+{{- $name := include "urumi-platform.fullname" . }}
+{{- if $p.autoscaling.enabled }}
+# Scale the gateway on CPU. It is stateless (MCP is served without sessions; registry, keys and
+# audit live in Postgres; replicas sync through LISTEN/NOTIFY), so any replica can answer any request.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "platform") | nindent 4 }}
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: {{ $name }} }
+  minReplicas: {{ $p.autoscaling.minReplicas }}
+  maxReplicas: {{ $p.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: {{ $p.autoscaling.targetCPUUtilizationPercentage }} }
+{{- end }}
+{{- if or $p.autoscaling.enabled (gt (int $p.replicas) 1) }}
+---
+# With two or more replicas, keep one serving during voluntary disruptions (node drain, upgrade).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "platform") | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "urumi-platform.componentSelector" (dict "ctx" . "component" "platform") | nindent 6 }}
+{{- end }}

@@ -1,0 +1,7 @@
+# Build context for the platform image is services/ (it bundles the dashboard).
+**/node_modules
+**/dist
+**/npm-debug.log
+platform/test
+woo-mcp
+ship-mcp

@@ -1,0 +1,195 @@
+{{- $p := .Values.platform }}
+{{- $name := include "urumi-platform.fullname" . }}
+{{- $secret := include "urumi-platform.secretName" . }}
+{{- /* Upstreams registered on first start: our own servers (Woo first, G8), then extras. */}}
+{{- $boot := list }}
+{{- if .Values.wooMcp.enabled }}
+{{- $boot = append $boot (dict "prefix" "woo" "name" "WooCommerce" "url" (printf "http://%s-woo-mcp.%s.svc.cluster.local:8080/mcp" $name .Release.Namespace) "authType" "bearer" "credentialEnv" "WOO_MCP_TOKEN") }}
+{{- end }}
+{{- if .Values.shipMcp.enabled }}
+{{- $boot = append $boot (dict "prefix" "ship" "name" "Shipping" "url" (printf "http://%s-ship-mcp.%s.svc.cluster.local:8080/mcp" $name .Release.Namespace) "authType" "bearer" "credentialEnv" "SHIP_MCP_TOKEN") }}
+{{- end }}
+{{- $boot = concat $boot $p.bootstrap.extraUpstreams }}
+{{- /* SSRF allowlist: our own in-cluster MCP servers by exact host name, plus platform.ssrf.allowHosts. */}}
+{{- $allow := list }}
+{{- if .Values.wooMcp.enabled }}{{- $allow = append $allow (printf "%s-woo-mcp.%s.svc.cluster.local" $name .Release.Namespace) }}{{- end }}
+{{- if .Values.shipMcp.enabled }}{{- $allow = append $allow (printf "%s-ship-mcp.%s.svc.cluster.local" $name .Release.Namespace) }}{{- end }}
+{{- $allow = concat $allow $p.ssrf.allowHosts }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "platform") | nindent 4 }}
+spec:
+  {{- if not $p.autoscaling.enabled }}
+  replicas: {{ $p.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "urumi-platform.componentSelector" (dict "ctx" . "component" "platform") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # For a Prometheus that discovers pods by annotation (the port is not behind the Ingress).
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ $p.metrics.port | quote }}
+        prometheus.io/path: /metrics
+      labels:
+        # app=platform is what the MCP upstreams' NetworkPolicies admit.
+        {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "platform") | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        # Apply committed Drizzle migrations before the app starts (waits for Postgres; idempotent;
+        # advisory lock). An init container rather than a Helm hook: with `helm install --wait`,
+        # post-install hooks only run after every pod is Ready, and the app is not Ready without
+        # its schema, so a hook would deadlock a fresh install.
+        - name: migrate
+          image: {{ include "urumi-platform.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["node", "src/db/migrate.ts"]
+          env:
+            {{- include "urumi-platform.pgEnv" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.migrate.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+      containers:
+        - name: platform
+          # Let the Service/Ingress stop routing here before the process exits (no 502s on rollout).
+          lifecycle:
+            preStop:
+              exec: { command: ["sleep", "5"] }
+          image: {{ include "urumi-platform.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - { name: PORT, value: "8080" }
+            {{- include "urumi-platform.pgEnv" . | nindent 12 }}
+            - name: PLATFORM_ENCRYPTION_KEY
+              valueFrom: { secretKeyRef: { name: {{ $secret }}, key: encryption-key } }
+            - { name: BOOTSTRAP_ADMIN_EMAIL, value: {{ $p.bootstrap.adminEmail | quote }} }
+            - name: BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ $secret }}, key: admin-password } }
+            - { name: BOOTSTRAP_UPSTREAMS, value: {{ $boot | toJson | quote }} }
+            {{- if .Values.wooMcp.enabled }}
+            - name: WOO_MCP_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ $secret }}, key: woo-mcp-token } }
+            {{- end }}
+            {{- if .Values.shipMcp.enabled }}
+            - name: SHIP_MCP_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ $secret }}, key: ship-mcp-token } }
+            {{- end }}
+            - { name: UPSTREAM_HEALTH_INTERVAL_MS, value: {{ $p.upstreamHealthIntervalMs | quote }} }
+            - { name: UPSTREAM_HEALTH_TIMEOUT_MS, value: {{ $p.upstreamHealthTimeoutMs | quote }} }
+            - { name: UPSTREAM_CALL_TIMEOUT_MS, value: {{ $p.upstreamCallTimeoutMs | quote }} }
+            - { name: UPSTREAM_HEALTH_FAILURE_THRESHOLD, value: {{ $p.upstreamHealthFailureThreshold | quote }} }
+            - name: GEMINI_API_KEY
+              valueFrom: { secretKeyRef: { name: {{ $p.chat.secretName }}, key: {{ $p.chat.secretKey }}, optional: true } }
+            - { name: CHAT_MODELS, value: {{ $p.chat.models | quote }} }
+            # Upstream URLs may not reach loopback, link-local/metadata or internal addresses,
+            # except these hosts and CIDRs (checked at registration and on every connection).
+            - { name: SSRF_ALLOW_HOSTS, value: {{ join "," $allow | quote }} }
+            - { name: SSRF_ALLOW_CIDRS, value: {{ join "," $p.ssrf.allowCidrs | quote }} }
+            - { name: TOOL_PINNING, value: {{ ternary "on" "off" $p.features.toolPinning | quote }} }
+            - { name: METRICS_PORT, value: {{ $p.metrics.port | quote }} }
+            - { name: RATE_LIMIT_PER_MINUTE, value: {{ $p.rateLimit.perMinute | quote }} }
+            - { name: RATE_LIMIT_BURST, value: {{ $p.rateLimit.burst | quote }} }
+            - { name: CHAT_RATE_PER_MINUTE, value: {{ $p.rateLimit.chatPerMinute | quote }} }
+            - { name: CHAT_RATE_BURST, value: {{ $p.rateLimit.chatBurst | quote }} }
+            - { name: TOOL_SEARCH, value: {{ ternary "on" "off" $p.features.toolSearch | quote }} }
+            - { name: CHAT_MAX_STEPS, value: {{ $p.chat.maxSteps | quote }} }
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: {{ $p.metrics.port }}
+          # Ready once bootstrap has run against the migrated schema and Postgres answers.
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml $p.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "platform") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "urumi-platform.componentSelector" (dict "ctx" . "component" "platform") | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+{{- if $p.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "platform") | nindent 4 }}
+  {{- $ann := $p.ingress.annotations | default dict }}
+  {{- if and $p.ingress.tls.enabled $p.ingress.tls.redirectHttp }}
+  {{- $ann = merge (dict "traefik.ingress.kubernetes.io/router.middlewares" (printf "%s-%s-https@kubernetescrd" .Release.Namespace $name)) $ann }}
+  {{- end }}
+  {{- with $ann }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ $p.ingress.className }}
+  {{- if $p.ingress.tls.enabled }}
+  tls:
+    - hosts: [{{ $p.ingress.host | quote }}]
+      secretName: {{ $p.ingress.tls.secretName | default (printf "%s-tls" $name) }}
+  {{- end }}
+  rules:
+    - host: {{ required "platform.ingress.host is required" $p.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $name }}
+                port:
+                  name: http
+{{- end }}
+{{- if and $p.ingress.enabled $p.ingress.tls.enabled $p.ingress.tls.redirectHttp }}
+---
+# Plain-HTTP requests to the dashboard and /mcp are redirected to HTTPS (Traefik middleware), so
+# session cookies and API keys only travel encrypted. HTTP-01 challenges use cert-manager's own
+# temporary Ingress and are not redirected.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ $name }}-https
+  namespace: {{ .Release.Namespace }}
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+{{- end }}

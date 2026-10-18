@@ -1,0 +1,11 @@
+# k3d (urumi-local): Traefik is published on host port 9080.
+store:
+  homeUrl: http://store.localhost:9080
+
+wordpress:
+  service:
+    extraPorts: [9080]
+
+# Created by scripts/secrets.sh, never by the chart.
+secrets:
+  existingSecret: store-secrets

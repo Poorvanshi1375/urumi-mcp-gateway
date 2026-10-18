@@ -1,0 +1,97 @@
+{{- $secret := include "urumi-store.secretName" . }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "urumi-store.mysqlHost" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "urumi-store.componentLabels" (dict "ctx" . "component" "mysql") | nindent 4 }}
+spec:
+  serviceName: {{ include "urumi-store.mysqlHost" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "urumi-store.componentSelector" (dict "ctx" . "component" "mysql") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "urumi-store.componentLabels" (dict "ctx" . "component" "mysql") | nindent 8 }}
+    spec:
+      # Runs as the image's mysql user (uid 999), never as root; the entrypoint then skips gosu
+      # and its chown step. Data created by this chart already belongs to 999.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ required "mysql.runAsUser is required (upgrading with --reuse-values skips new chart defaults: use --reset-then-reuse-values)" .Values.mysql.runAsUser }}
+        runAsGroup: {{ required "mysql.runAsUser is required (upgrading with --reuse-values skips new chart defaults: use --reset-then-reuse-values)" .Values.mysql.runAsUser }}
+        fsGroup: {{ required "mysql.runAsUser is required (upgrading with --reuse-values skips new chart defaults: use --reset-then-reuse-values)" .Values.mysql.runAsUser }}
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: mysql
+          image: "{{ .Values.mysql.image.repository }}:{{ .Values.mysql.image.tag }}"
+          imagePullPolicy: {{ .Values.mysql.image.pullPolicy }}
+          {{- with .Values.mysql.extraArgs }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ $secret }}, key: mysql-root-password }
+            - name: MYSQL_DATABASE
+              value: {{ .Values.mysql.database | quote }}
+            - name: MYSQL_USER
+              value: {{ .Values.mysql.user | quote }}
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ $secret }}, key: mysql-password }
+          ports:
+            - name: mysql
+              containerPort: 3306
+          # During first-run init the entrypoint's temporary server has networking off,
+          # so TCP probes on 127.0.0.1 only succeed once the real server is up.
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$MYSQL_ROOT_PASSWORD\" --silent"]
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "mysql -h 127.0.0.1 -uroot -p\"$MYSQL_ROOT_PASSWORD\" -e 'SELECT 1' >/dev/null"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$MYSQL_ROOT_PASSWORD\" --silent"]
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.mysql.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+            # Read-only root filesystem: socket/pid, secure_file_priv and temp files get their own space.
+            - { name: run, mountPath: /var/run/mysqld }
+            - { name: files, mountPath: /var/lib/mysql-files }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: run, emptyDir: {} }
+        - { name: files, emptyDir: {} }
+        - { name: tmp, emptyDir: {} }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "urumi-store.componentSelector" (dict "ctx" . "component" "mysql") | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.mysql.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.mysql.persistence.size }}

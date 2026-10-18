@@ -1,0 +1,27 @@
+{{- if .Values.wooMcp.enabled }}
+{{- $s := .Values.wooMcp.store }}
+{{- $env := printf `- { name: WC_SIGNING_BASE_URL, value: %s }
+- { name: WC_CONNECT_HOST, value: %s }
+- { name: WC_TIMEOUT_MS, value: %s }
+- name: WC_CONSUMER_KEY
+  valueFrom:
+    secretKeyRef: { name: %s, key: %s }
+- name: WC_CONSUMER_SECRET
+  valueFrom:
+    secretKeyRef: { name: %s, key: %s }`
+  (required "wooMcp.store.signingBaseUrl is required" $s.signingBaseUrl | quote) ($s.connectHost | quote) (.Values.wooMcp.timeoutMs | quote)
+  $s.secretName $s.consumerKeyKey $s.secretName $s.consumerSecretKey }}
+{{- /* Readiness makes a signed request to the store (also catches signing-URL drift). */}}
+{{- /* Egress: DNS (to find the store's Service) and the store's WordPress pods on :80, nothing else. */}}
+{{- $dns := .Values.networkPolicy.dns }}
+{{- $egress := printf `- to:
+    - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: %s } }
+      podSelector: { matchLabels: %s }
+  ports: [ { port: 53, protocol: UDP }, { port: 53, protocol: TCP } ]
+- to:
+    - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: %s } }
+      podSelector: { matchLabels: %s }
+  ports: [ { port: 80, protocol: TCP } ]`
+  $dns.namespace ($dns.podLabels | toJson) ($s.namespace | default .Release.Namespace) ($s.wordpressPodLabels | toJson) }}
+{{- include "urumi-platform.mcpUpstream" (dict "ctx" . "component" "woo-mcp" "cfg" .Values.wooMcp "tokenKey" "woo-mcp-token" "extraEnv" $env "readinessTimeout" 10 "egress" $egress) }}
+{{- end }}

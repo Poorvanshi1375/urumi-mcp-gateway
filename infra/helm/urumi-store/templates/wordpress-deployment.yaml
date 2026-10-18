@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "urumi-store.fullname" . }}-wordpress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "urumi-store.componentLabels" (dict "ctx" . "component" "wordpress") | nindent 4 }}
+spec:
+  replicas: 1
+  # RWO volume: the old pod must release it before the new one starts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "urumi-store.componentSelector" (dict "ctx" . "component" "wordpress") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "urumi-store.componentLabels" (dict "ctx" . "component" "wordpress") | nindent 8 }}
+    spec:
+      # Apache runs as www-data (uid 33) instead of starting as root and dropping privileges.
+      # Binding port 80 as non-root is allowed by this namespaced, "safe" sysctl, so no capability
+      # is needed (all are dropped). The files on the volume already belong to 33.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ required "wordpress.runAsUser is required (upgrading with --reuse-values skips new chart defaults: use --reset-then-reuse-values)" .Values.wordpress.runAsUser }}
+        runAsGroup: {{ required "wordpress.runAsUser is required (upgrading with --reuse-values skips new chart defaults: use --reset-then-reuse-values)" .Values.wordpress.runAsUser }}
+        fsGroup: {{ required "wordpress.runAsUser is required (upgrading with --reuse-values skips new chart defaults: use --reset-then-reuse-values)" .Values.wordpress.runAsUser }}
+        seccompProfile: { type: RuntimeDefault }
+        sysctls:
+          - { name: net.ipv4.ip_unprivileged_port_start, value: "0" }
+      initContainers:
+        # On an empty volume the image's entrypoint copies WordPress in with tar, which also tries to
+        # chmod the volume's root directory. That directory belongs to root (local-path creates it),
+        # so as www-data the copy exits with an error and the container restarts once. Copying the
+        # children by name instead leaves the root directory alone; the entrypoint then finds
+        # WordPress present and skips its own copy. Does nothing when WordPress is already there.
+        - name: copy-wordpress
+          image: "{{ .Values.wordpress.image.repository }}:{{ .Values.wordpress.image.tag }}"
+          imagePullPolicy: {{ .Values.wordpress.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              if [ -e /var/www/html/index.php ] || [ -e /var/www/html/wp-includes/version.php ]; then
+                echo "WordPress already present"; exit 0
+              fi
+              cd /usr/src/wordpress && tar -cf - $(ls -A) | tar -C /var/www/html -xf -
+              echo "WordPress copied to the volume"
+          resources:
+            {{- toYaml .Values.wordpress.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: html, mountPath: /var/www/html }
+      containers:
+        - name: wordpress
+          image: "{{ .Values.wordpress.image.repository }}:{{ .Values.wordpress.image.tag }}"
+          imagePullPolicy: {{ .Values.wordpress.image.pullPolicy }}
+          env:
+            {{- include "urumi-store.wordpressEnv" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 80
+          startupProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 5
+            failureThreshold: 36
+          # 302 counts as success; wp-login.php returns 500 when the DB is unreachable.
+          readinessProbe:
+            httpGet: { path: /wp-login.php, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet: { path: /wp-includes/images/blank.gif, port: http }
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.wordpress.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: html
+              mountPath: /var/www/html
+            # Read-only root filesystem: Apache's run and lock directories, PHP sessions and uploads.
+            - { name: apache-run, mountPath: /var/run/apache2 }
+            - { name: apache-lock, mountPath: /var/lock/apache2 }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: apache-run, emptyDir: {} }
+        - { name: apache-lock, emptyDir: {} }
+        - { name: tmp, emptyDir: {} }
+        - name: html
+          persistentVolumeClaim:
+            claimName: {{ include "urumi-store.fullname" . }}-wordpress

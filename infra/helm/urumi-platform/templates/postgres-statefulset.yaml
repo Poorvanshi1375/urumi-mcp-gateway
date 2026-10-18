@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "urumi-platform.postgresHost" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "postgres") | nindent 4 }}
+spec:
+  serviceName: {{ include "urumi-platform.postgresHost" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "urumi-platform.componentSelector" (dict "ctx" . "component" "postgres") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "postgres") | nindent 8 }}
+    spec:
+      # Runs as the image's own postgres user (uid 70 in the alpine image), never as root. The
+      # entrypoint then skips its chown step, so the data directory must already belong to that
+      # user: true for data created by this chart; on a fresh volume initdb creates it as 70.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ required "postgres.runAsUser is required (upgrading with --reuse-values skips new chart defaults: use --reset-then-reuse-values)" .Values.postgres.runAsUser }}
+        runAsGroup: {{ required "postgres.runAsUser is required (upgrading with --reuse-values skips new chart defaults: use --reset-then-reuse-values)" .Values.postgres.runAsUser }}
+        fsGroup: {{ required "postgres.runAsUser is required (upgrading with --reuse-values skips new chart defaults: use --reset-then-reuse-values)" .Values.postgres.runAsUser }}
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.user | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ include "urumi-platform.secretName" . }}, key: postgres-password }
+          ports:
+            - name: postgres
+              containerPort: 5432
+          # First-run init listens on a socket only; TCP on 127.0.0.1 succeeds once the real server is up.
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -h 127.0.0.1 -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 3
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -h 127.0.0.1 -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -h 127.0.0.1 -U \"$POSTGRES_USER\""]
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            # Postgres 18 images keep PGDATA under /var/lib/postgresql/18/docker; mount the parent.
+            - name: data
+              mountPath: /var/lib/postgresql
+            # The root filesystem is read-only: socket directory and temp files get their own space.
+            - { name: run, mountPath: /var/run/postgresql }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: run, emptyDir: {} }
+        - { name: tmp, emptyDir: {} }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "urumi-platform.componentSelector" (dict "ctx" . "component" "postgres") | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.postgres.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgres.persistence.size }}

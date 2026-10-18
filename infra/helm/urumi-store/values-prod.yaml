@@ -1,0 +1,24 @@
+# Production-like k3s on EC2 (Gate 4). Same chart as k3d; only values differ.
+# Host-specific values are passed by infra/scripts/deploy-ec2.sh:
+#   --set store.host=store.<ip>.nip.io --set store.homeUrl=http://store.<ip>.nip.io
+# Public port is 80 (Traefik), so no extra Service port is needed (local k3d uses 9080).
+store:
+  host: ""        # set by deploy-ec2.sh
+  homeUrl: ""     # set by deploy-ec2.sh; WooCommerce signs OAuth over this exact URL
+
+wordpress:
+  service:
+    extraPorts: []
+
+# TLS from Let's Encrypt via cert-manager (installed by deploy-ec2.sh with ClusterIssuer "letsencrypt").
+# store.homeUrl is then https://store.<ip>.nip.io; woo-mcp still signs over http (in-cluster).
+ingress:
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+  tls:
+    enabled: true
+    redirectHttp: true
+
+# Created by scripts/secrets.sh, never by the chart.
+secrets:
+  existingSecret: store-secrets

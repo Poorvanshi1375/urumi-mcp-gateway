@@ -1,0 +1,60 @@
+@import "tailwindcss";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+
+/* House: Urumi's own light design tokens (urumi.ai). Only these colours are available as utilities. */
+@theme {
+  --color-*: initial;
+  --color-page: #F3F2ED;
+  --color-surface: #FAF9F6;
+  --color-sidebar: #ECEAE3;
+  --color-raised: #DCD8CD;
+  --color-line: #D6D3C8;
+  --color-line-strong: #AEAA9C;
+  --color-ink: #121517;
+  --color-ink-2: #4A4D4E;
+  --color-muted: #636564;
+  --color-teal: #136B69;
+  --color-teal-hover: #0F5654;
+  --color-teal-tint: #DDE4E0;
+  --color-on-teal: #EAF4F2;
+  --color-ok: #2F7D4F;
+  --color-ok-text: #276A42;
+  --color-ok-tint: #DBE4DA;
+  --color-warn: #B7791F;
+  --color-warn-text: #8A5A10;
+  --color-warn-tint: #ECE3D4;
+  --color-bad: #A63A3A;
+  --color-bad-tint: #EADCD8;
+  --color-off: #858B8E;
+  --color-off-text: #565B5E;
+  --color-off-tint: #E4E4E0;
+  --color-white: #FFFFFF;
+  --color-transparent: transparent;
+
+  /* Switzer is used when installed/bundled (licence check pending); otherwise the system grotesk. */
+  --font-sans: "Switzer", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  --radius-card: 14px;
+}
+
+@layer base {
+  html, body, #root { height: 100%; }
+  body { @apply bg-page text-ink font-sans antialiased; font-size: 14px; }
+  :focus-visible { outline: 2px solid var(--color-teal); outline-offset: 2px; }
+  ::selection { background: var(--color-teal-tint); }
+}
+
+@layer components {
+  .eyebrow { @apply font-mono text-[11px] uppercase text-muted; letter-spacing: 0.14em; }
+  .chip { @apply inline-flex items-center rounded-full border border-line bg-sidebar px-2 py-0.5 font-mono text-[12px] text-ink; }
+  .card { @apply rounded-card border border-line bg-surface; }
+  .input { @apply w-full rounded-[10px] border border-line bg-surface px-3 py-2 text-[14px] text-ink placeholder:text-muted focus:border-teal focus:outline-none; }
+  .label { @apply text-[13px] font-medium text-ink; }
+  .help { @apply text-[12px] text-muted; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

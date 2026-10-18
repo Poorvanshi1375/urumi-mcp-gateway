@@ -1,0 +1,180 @@
+nameOverride: platform           # resources: platform-* for release "platform"
+fullnameOverride: ""
+
+# Platform image (services/platform). Built and imported locally with
+# infra/scripts/build-platform.sh, which prints the tag to pass as image.tag.
+image:
+  repository: urumi-platform
+  tag: ""                         # required
+  pullPolicy: IfNotPresent
+
+# Credentials come from a Secret this chart never creates, so no secret value is ever in values
+# or in Helm's release history. scripts/secrets.sh creates it. Required. Keys:
+#   postgres-password, admin-password (bootstrap admin), woo-mcp-token / ship-mcp-token (bearer
+#   tokens the gateway sends to our MCP servers), encryption-key (encrypts upstream credentials at
+#   rest; losing it makes the stored credentials unreadable).
+secrets:
+  existingSecret: ""
+
+postgres:
+  image:
+    repository: postgres
+    tag: "18-alpine"
+    pullPolicy: IfNotPresent
+  database: urumi
+  user: urumi
+  runAsUser: 70                   # the postgres user of postgres:*-alpine images
+  persistence:
+    size: 2Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+# The platform app (services/platform): MCP gateway at /mcp (dashboard API and chat in M4).
+# Every pod first runs the Drizzle migrations in an init container (idempotent, advisory-locked).
+platform:
+  # Fixed replica count; ignored when autoscaling is enabled. 2 or more adds a PodDisruptionBudget.
+  replicas: 1
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
+  # Prometheus metrics on a separate port (not routed by the Ingress; see networkPolicy.metricsScrapers).
+  metrics:
+    port: 9464
+  # Token bucket per API key on /mcp, and per user on the chat agent. Per replica. 0 = no limit.
+  rateLimit:
+    perMinute: 120
+    burst: 60
+    chatPerMinute: 10
+    chatBurst: 5
+  ingress:
+    enabled: true
+    className: traefik
+    host: ""                      # required, e.g. localhost (k3d) or app.example.com
+    annotations: {}
+    tls:
+      enabled: false
+      secretName: ""              # default <release>-platform-tls
+      redirectHttp: false         # Traefik only: redirect http:// to https://
+  upstreamHealthIntervalMs: 10000
+  upstreamHealthTimeoutMs: 8000
+  upstreamCallTimeoutMs: 20000
+  upstreamHealthFailureThreshold: 2   # consecutive failed checks before Connected -> Unreachable
+  # SSRF guard for admin-entered upstream URLs. Loopback, link-local (cloud metadata) and other
+  # never-valid addresses are always refused. Internal addresses (private ranges, the cluster's
+  # pod and Service networks) are refused unless the host or CIDR is listed here. Our own woo-mcp
+  # and ship-mcp Services are added automatically. Entries: exact host or "*.suffix".
+  ssrf:
+    allowHosts: []
+    allowCidrs: []
+  # Off by default so they cannot affect the core flow; turn on to show them.
+  features:
+    # Hash each upstream tool's definition; hide changed or new tools until an admin approves them.
+    toolPinning: false
+    # Let clients connect to /mcp?mode=search and get two tools (search_tools, call_tool) instead
+    # of the full list. Normal /mcp is unchanged.
+    toolSearch: false
+  bootstrap:
+    # First start only: created if there are no users / no upstream with that prefix.
+    adminEmail: admin@example.com
+    # woo-mcp and ship-mcp (when enabled) are registered automatically, Woo first (G8).
+    extraUpstreams:
+      - prefix: deepwiki
+        name: DeepWiki
+        url: https://mcp.deepwiki.com/mcp
+        authType: none
+  # Chat agent (Gemini). The API key lives in its own Secret, created out of band so it is never
+  # in Helm values or release history:  kubectl create secret generic platform-llm -n urumi \
+  #   --from-file=gemini-api-key=<file>.  Without it, chat reports "not configured".
+  chat:
+    secretName: platform-llm
+    secretKey: gemini-api-key
+    models: "gemini-3.5-flash,gemini-3.5-flash-lite"   # tried in order; next one on overload/rate limit
+    maxSteps: 8
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 384Mi
+
+# Who may talk to whom (all pods of this release are default-deny for ingress; the MCP servers
+# also for egress). Adjust for another Ingress controller or DNS deployment.
+networkPolicy:
+  ingressController:
+    namespace: kube-system
+    podLabels: { app.kubernetes.io/name: traefik }      # k3s / k3d Traefik
+  dns:
+    namespace: kube-system
+    podLabels: { k8s-app: kube-dns }                    # CoreDNS
+  # Who may scrape /metrics, e.g. [{ namespace: monitoring, podLabels: { app.kubernetes.io/name: prometheus } }].
+  # Empty: nobody in the cluster (kubectl port-forward and exec still work).
+  metricsScrapers: []
+
+migrate:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# WooCommerce MCP server (services/woo-mcp). Cluster-internal: ClusterIP Service plus a
+# NetworkPolicy that only admits pods labelled app=<allowedClientApp> from this release.
+wooMcp:
+  enabled: true
+  image:
+    repository: urumi-woo-mcp
+    tag: ""                       # required when enabled (infra/scripts/build-image.sh woo-mcp)
+    pullPolicy: IfNotPresent
+  store:
+    # Secret (same namespace) with the Woo REST key, created by the urumi-store chart.
+    secretName: store-secrets
+    consumerKeyKey: woo-consumer-key
+    consumerSecretKey: woo-consumer-secret
+    # Woo signs OAuth over the WordPress home URL (KT §D.4): set it per environment.
+    signingBaseUrl: ""            # required, e.g. http://store.localhost:9080
+    # Where to actually connect: the store Service, reached with the signing URL's port.
+    connectHost: store-wordpress.urumi.svc.cluster.local
+    # The store's WordPress pods: woo-mcp's only allowed egress besides DNS (NetworkPolicy).
+    namespace: ""                 # default: this release's namespace
+    wordpressPodLabels: { app: wordpress, app.kubernetes.io/instance: store }
+  timeoutMs: 15000
+  allowedClientApp: platform
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# Shipping MCP server (services/ship-mcp): second owned upstream; its get_order tool deliberately
+# collides with woo-mcp's (G3). Same network isolation as woo-mcp.
+shipMcp:
+  enabled: true
+  image:
+    repository: urumi-ship-mcp
+    tag: ""                       # required when enabled (infra/scripts/build-image.sh ship-mcp)
+    pullPolicy: IfNotPresent
+  # Test knob for gateway timeouts (G4): delays every tool call. Keep 0 outside tests.
+  simulatedLatencyMs: 0
+  # Test knob for tool pinning: appended to quote_shipping's description. Keep empty outside tests.
+  testDescriptionSuffix: ""
+  allowedClientApp: platform
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 192Mi

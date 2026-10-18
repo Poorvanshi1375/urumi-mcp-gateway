@@ -1,0 +1,17 @@
+# k3d (urumi-local). Image tags come from infra/scripts/build-image.sh:
+#   --set image.tag=<platform tag> --set wooMcp.image.tag=<woo-mcp tag> --set shipMcp.image.tag=<ship-mcp tag>
+# The gateway is served at http://localhost:9080 (Node and curl resolve "localhost";
+# "*.localhost" names are not resolvable by Node on WSL).
+platform:
+  ingress:
+    host: localhost
+  upstreamHealthIntervalMs: 5000
+  replicas: 2              # two gateway replicas behind Traefik (stateless MCP; shows load balancing)
+
+wooMcp:
+  store:
+    signingBaseUrl: http://store.localhost:9080
+
+# Created by scripts/secrets.sh, never by the chart.
+secrets:
+  existingSecret: platform-secrets

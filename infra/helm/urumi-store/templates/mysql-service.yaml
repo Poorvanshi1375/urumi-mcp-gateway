@@ -1,0 +1,16 @@
+# Headless: governs the StatefulSet and gives clients a stable DNS name. ClusterIP-only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "urumi-store.mysqlHost" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "urumi-store.componentLabels" (dict "ctx" . "component" "mysql") | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "urumi-store.componentSelector" (dict "ctx" . "component" "mysql") | nindent 4 }}
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql

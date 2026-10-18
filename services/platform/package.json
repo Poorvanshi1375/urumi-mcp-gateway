@@ -1,0 +1,34 @@
+{
+  "name": "urumi-platform",
+  "private": true,
+  "type": "module",
+  "description": "Urumi platform: MCP gateway, dashboard API and chat agent (one Fastify app)",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/server.ts",
+    "cli": "node src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "node src/db/migrate.ts"
+  },
+  "dependencies": {
+    "@fastify/cookie": "11.1.2",
+    "@fastify/static": "10.1.5",
+    "@modelcontextprotocol/client": "2.3.1",
+    "@modelcontextprotocol/node": "2.1.1",
+    "@modelcontextprotocol/server": "2.3.1",
+    "drizzle-orm": "0.45.3",
+    "fastify": "5.12.5",
+    "pg": "8.23.1",
+    "undici": "7.29.1",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.1",
+    "@types/pg": "8.23.1",
+    "drizzle-kit": "0.31.11",
+    "typescript": "7.0.2"
+  }
+}

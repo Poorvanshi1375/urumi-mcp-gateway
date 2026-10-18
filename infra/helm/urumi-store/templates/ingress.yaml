@@ -1,0 +1,50 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "urumi-store.fullname" . }}-wordpress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "urumi-store.componentLabels" (dict "ctx" . "component" "wordpress") | nindent 4 }}
+  {{- $ann := .Values.ingress.annotations | default dict }}
+  {{- if and .Values.ingress.tls.enabled .Values.ingress.tls.redirectHttp }}
+  {{- $ann = merge (dict "traefik.ingress.kubernetes.io/router.middlewares" (printf "%s-%s-https@kubernetescrd" .Release.Namespace (include "urumi-store.fullname" .))) $ann }}
+  {{- end }}
+  {{- with $ann }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  # Certificate from cert-manager (annotation in values-prod) or any Secret named here.
+  tls:
+    - hosts: [{{ .Values.store.host | quote }}]
+      secretName: {{ .Values.ingress.tls.secretName | default (printf "%s-tls" (include "urumi-store.fullname" .)) }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.store.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "urumi-store.fullname" . }}-wordpress
+                port:
+                  name: http
+{{- end }}
+{{- if and .Values.ingress.enabled .Values.ingress.tls.enabled .Values.ingress.tls.redirectHttp }}
+---
+# Plain-HTTP storefront requests go to HTTPS (Traefik middleware): checkout and wp-admin cookies
+# only travel encrypted. cert-manager's HTTP-01 challenges use their own Ingress, not redirected.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ include "urumi-store.fullname" . }}-https
+  namespace: {{ .Release.Namespace }}
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+{{- end }}

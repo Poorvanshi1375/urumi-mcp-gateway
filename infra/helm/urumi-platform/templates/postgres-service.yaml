@@ -1,0 +1,16 @@
+# Headless: governs the StatefulSet and gives clients a stable DNS name. ClusterIP-only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "urumi-platform.postgresHost" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "postgres") | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "urumi-platform.componentSelector" (dict "ctx" . "component" "postgres") | nindent 4 }}
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres

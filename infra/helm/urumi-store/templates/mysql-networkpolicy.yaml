@@ -1,0 +1,22 @@
+# Defence in depth: only WordPress and the WP-CLI setup Job (this release) may connect to MySQL.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "urumi-store.mysqlHost" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "urumi-store.componentLabels" (dict "ctx" . "component" "mysql") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "urumi-store.componentSelector" (dict "ctx" . "component" "mysql") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - { key: app.kubernetes.io/instance, operator: In, values: [{{ .Release.Name | quote }}] }
+              - { key: app, operator: In, values: ["wordpress", "setup"] }
+      ports:
+        - port: 3306
+          protocol: TCP

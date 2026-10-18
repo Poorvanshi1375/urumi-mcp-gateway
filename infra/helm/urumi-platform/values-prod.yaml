@@ -1,0 +1,27 @@
+# Production-like k3s on EC2 (Gate 4). Same chart as k3d; only values differ.
+# Host-specific values are passed by infra/scripts/deploy-ec2.sh:
+#   --set platform.ingress.host=app.<ip>.nip.io
+#   --set wooMcp.store.signingBaseUrl=http://store.<ip>.nip.io
+# Images are copied to the node by deploy-ec2.sh (k3s ctr import), so IfNotPresent finds them.
+platform:
+  ingress:
+    host: ""          # set by deploy-ec2.sh
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt
+    tls:
+      enabled: true
+      redirectHttp: true
+  upstreamHealthIntervalMs: 10000
+  autoscaling:
+    enabled: true          # HPA on CPU, 2 to 4 gateway replicas (k3s ships metrics-server)
+
+wooMcp:
+  store:
+    # Must equal the store's home URL (scheme, host, port): WooCommerce verifies OAuth signatures
+    # over it (KT §D.4). Public port 80 → no port in the URL, and woo-mcp connects to the
+    # store Service on port 80.
+    signingBaseUrl: ""   # set by deploy-ec2.sh
+
+# Created by scripts/secrets.sh, never by the chart.
+secrets:
+  existingSecret: platform-secrets

@@ -1,0 +1,56 @@
+{{- /*
+Default deny: no pod of this release accepts traffic unless a policy allows it (gateway below;
+Postgres and the MCP servers in their own templates). Only this release's pods are selected.
+*/}}
+{{- $np := .Values.networkPolicy }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "urumi-platform.fullname" . }}-default-deny
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "urumi-platform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: ["Ingress"]
+---
+# The gateway (dashboard, /api, /mcp) accepts only the Ingress controller. Its egress stays open:
+# it calls admin-registered MCP servers anywhere and the LLM API (URLs are checked by the SSRF guard).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "urumi-platform.fullname" . }}-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "platform") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "urumi-platform.componentSelector" (dict "ctx" . "component" "platform") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ $np.ingressController.namespace }} }
+          podSelector:
+            matchLabels:
+              {{- toYaml $np.ingressController.podLabels | nindent 14 }}
+      ports:
+        - port: 8080
+          protocol: TCP
+    {{- with $np.metricsScrapers }}
+    # /metrics on its own port, only for the listed scrapers (e.g. Prometheus).
+    - from:
+        {{- range . }}
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ .namespace }} }
+          podSelector:
+            matchLabels:
+              {{- toYaml .podLabels | nindent 14 }}
+        {{- end }}
+      ports:
+        - port: {{ $.Values.platform.metrics.port }}
+          protocol: TCP
+    {{- end }}
