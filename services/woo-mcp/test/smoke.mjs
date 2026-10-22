@@ -29,7 +29,7 @@ const call = (name, args) => client.callTool({ name, arguments: args });
 
 await check('tools/list', async () => {
   const names = (await client.listTools()).tools.map(t => t.name).sort();
-  const want = ['create_product', 'get_order', 'list_orders', 'list_products', 'update_order_status'];
+  const want = ['create_product', 'get_order', 'get_store_info', 'list_orders', 'list_products', 'update_order_status'];
   must(JSON.stringify(names) === JSON.stringify(want), names.join(','));
   return names.join(', ');
 });
@@ -46,6 +46,16 @@ await check('create_product (draft, TEST- sku)', async () => {
   const r = await call('create_product', { name: 'Smoke Test Product', regular_price: '12.50', sku: `TEST-${Date.now()}`, status: 'draft' });
   must(!r.isError, r.content[0].text); created = json(r);
   return `id=${created.id} ${created.status} ${created.regular_price}`;
+});
+await check('create_product again with the same sku -> existing product', async () => {
+  const r = json(await call('create_product', { name: 'Smoke Test Product', regular_price: '12.50', sku: created.sku, status: 'draft' }));
+  must(r.id === created.id && r.already_existed === true, JSON.stringify(r));
+  return `id=${r.id} already_existed (no duplicate)`;
+});
+await check('create_product same sku, other product -> conflict', async () => {
+  const r = await call('create_product', { name: 'Another Product', regular_price: '99', sku: created.sku, status: 'draft' });
+  must(r.isError && /already used by product #/.test(r.content[0].text), r.content[0].text);
+  return r.content[0].text.slice(0, 90);
 });
 await check('create_product invalid price -> rejected', async () => {
   const r = await call('create_product', { name: 'Bad', regular_price: 'twelve' }).catch(e => ({ thrown: e.message }));
@@ -64,6 +74,22 @@ await check('list_orders created_on=<newest order day>', async () => {
   const none = json(await call('list_orders', { created_on: '2020-01-01' }));
   must(none.count === 0, `2020-01-01 returned ${none.count}`);
   return `${day}: ${d.count} orders; 2020-01-01: 0`;
+});
+await check('get_store_info', async () => {
+  const s = json(await call('get_store_info', {}));
+  must(/^\d{4}-\d{2}-\d{2}$/.test(s.today) && s.currency && (s.timezone || Number.isFinite(s.utc_offset_hours)), JSON.stringify(s));
+  return `${s.name}: ${s.timezone ?? `UTC${s.utc_offset_hours >= 0 ? '+' : ''}${s.utc_offset_hours}`}, today ${s.today}, ${s.currency} ${s.currency_symbol}`;
+});
+await check('list_orders created_on="today" = the store\'s date', async () => {
+  const today = json(await call('get_store_info', {})).today;
+  const a = json(await call('list_orders', { created_on: 'today' })), b = json(await call('list_orders', { created_on: today }));
+  must(a.created_on === today && a.count === b.count, `today -> ${a.created_on} (${a.count}), ${today} -> ${b.count}`);
+  return `"today" resolved by the store to ${today}: ${a.count} orders`;
+});
+await check('orders carry no customer contact details', async () => {
+  const text = JSON.stringify(orders) + JSON.stringify(json(await call('get_order', { id: orders.orders[0].id })));
+  must(!text.includes('@') && !/"(email|phone|address_1)"/.test(text), text.match(/.{20}@.{20}/)?.[0] ?? 'contact field present');
+  return `no "@", email, phone or street address in ${orders.count} listed orders and get_order`;
 });
 const target = () => orders.orders[orders.orders.length - 1];
 await check('get_order', async () => {

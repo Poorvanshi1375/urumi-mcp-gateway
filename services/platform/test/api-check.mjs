@@ -99,7 +99,7 @@ await check('member sees servers with status and tools (G7)', async () => {
   const r = await member('GET', '/api/servers');
   must(r.status === 200, r.status);
   const summary = r.json.servers.map(s => `${s.prefix}:${s.status}:${s.tools.length}`).join(', ');
-  must(r.json.servers.some(s => s.prefix === 'woo' && s.tools.length === 5), summary);
+  must(r.json.servers.some(s => s.prefix === 'woo' && s.tools.length === 6), summary);
   must(r.json.servers.every(s => s.url === null), 'member can see upstream URLs');
   const a = await admin('GET', '/api/servers');
   must(a.json.servers.every(s => typeof s.url === 'string'), 'admin cannot see URLs');
@@ -122,6 +122,48 @@ await check('server URL with a query string or user info -> 400', async () => {
   must(q.status === 400 && u.status === 400, `${q.status} ${q.text} / ${u.status} ${u.text}`);
   return `${q.json.error} / ${u.json.error}`;
 });
+await check('Q: sign-ins are recorded with the client address, not a cluster one', async () => {
+  // Behind default k3s ServiceLB every client was 10.42.0.1 (shared per-address limits). With
+  // Traefik on hostPort (infra/k3s/traefik-hostport.yaml) the address is the client's on the VPS;
+  // on k3d it is k3d's load-balancer container, which is still outside the pod and Service ranges.
+  const rows = (await admin('GET', '/api/activity?limit=50')).json.events.filter(e => e.action === 'login' && e.actorEmail === ADMIN_EMAIL);
+  const ip = rows[0]?.ip ?? '';
+  must(ip && !/^(::ffff:)?10\.4[23]\./.test(ip), `sign-in recorded from ${ip || 'nothing'}`);
+  return `last sign-in recorded from ${ip}`;
+});
+await check('B: the gateway refuses itself as an upstream', async () => {
+  const r = await admin('POST', '/api/servers', { prefix: 'selfloop', name: 'Self', url: `${BASE}/mcp`, authType: 'none' });
+  must(r.status === 400 && /own address/.test(r.json.error ?? ''), `${r.status} ${r.text.slice(0, 160)}`);
+  return `${BASE}/mcp -> 400 "${r.json.error.slice(0, 90)}"`;
+});
+await check('AQ: reserved names refused as credential headers', async () => {
+  const out = [];
+  for (const h of ['Host', 'Content-Length', 'Transfer-Encoding', 'MCP-Protocol-Version', 'Mcp-Session-Id', 'X-Forwarded-For', 'Cookie']) {
+    const r = await admin('POST', '/api/servers', { prefix: 'hdrtest', name: 'Header test', url: 'https://mcp.deepwiki.com/mcp', authType: 'header', authHeaderName: h, credential: 'x' });
+    if (r.status !== 400 || !/reserved/.test(r.json.error ?? '')) out.push(`${h}: ${r.status} ${r.text.slice(0, 80)}`);
+  }
+  must(!out.length, out.join('; '));
+  return '7 reserved names (Host, Content-Length, Transfer-Encoding, MCP-*, X-Forwarded-*, Cookie) -> 400 "reserved"';
+});
+await check('C: when chat asks, per tool; only admins change it', async () => {
+  const m = await member('PUT', '/api/servers/woo/confirm', { tool: 'list_orders', mode: 'always' });
+  must(m.status === 403, `member -> ${m.status}`);
+  const tools = async () => Object.fromEntries((await admin('GET', '/api/servers')).json.servers.flatMap(s => s.tools.map(t => [`${s.prefix}/${t.name}`, t])));
+  let t = await tools();
+  must(t['woo/create_product']?.asksInChat === true && t['woo/list_orders']?.asksInChat === false, `woo: create ${t['woo/create_product']?.asksInChat}, list ${t['woo/list_orders']?.asksInChat}`);
+  const dw = Object.entries(t).filter(([k]) => k.startsWith('deepwiki/'));
+  must(dw.every(([, x]) => x.chatConfirm === 'never' && x.asksInChat === false), `deepwiki: ${JSON.stringify(dw.map(([k, x]) => [k, x.chatConfirm]))}`);
+  try {
+    must((await admin('PUT', '/api/servers/woo/confirm', { tool: 'list_orders', mode: 'always' })).status === 200, 'set always failed');
+    t = await tools();
+    must(t['woo/list_orders'].chatConfirm === 'always' && t['woo/list_orders'].asksInChat === true, JSON.stringify(t['woo/list_orders'].chatConfirm));
+  } finally {
+    await admin('PUT', '/api/servers/woo/confirm', { tool: 'list_orders', mode: 'auto' });
+  }
+  t = await tools();
+  must(t['woo/list_orders'].chatConfirm === 'auto' && t['woo/list_orders'].asksInChat === false, 'auto not restored');
+  return `member 403; create_product asks, list_orders runs; deepwiki ${dw.length} tools "never" (seed); "always" makes list_orders ask; back to auto`;
+});
 await check('member creates own API key (T6) and uses it on /mcp', async () => {
   const r = await member('POST', '/api/keys', { name: 'my laptop' });
   must(r.status === 200 && r.json.key.startsWith('urk_'), r.text); memberKey = r.json.key; memberKeyId = r.json.id;
@@ -134,6 +176,20 @@ await check('key list shows prefix only, never the key', async () => {
   const r = await member('GET', '/api/keys');
   must(r.json.keys.length === 1 && !r.text.includes(memberKey) && !/keyHash|key_hash/.test(r.text), r.text.slice(0, 120));
   return `${r.json.keys.map(k => `${k.prefix} ${k.name}`).join(', ')}`;
+});
+await check('P: audit CSV is scoped and formula-safe', async () => {
+  // A client-chosen tool name that a spreadsheet would run as a formula.
+  const c = await mcp(memberKey);
+  await c.callTool({ name: '=1+1', arguments: {} }).catch(() => {});
+  await c.close();
+  const m = await member('GET', '/api/audit/export.csv');
+  must(m.status === 200 && m.text.startsWith('"at","user"'), `${m.status} ${m.text.slice(0, 80)}`);
+  const lines = m.text.trim().split('\r\n').slice(1);
+  must(lines.length >= 2 && lines.every(l => l.includes(`"${memberEmail}"`)), `rows of other users in the member export: ${lines.filter(l => !l.includes(memberEmail)).length}`);
+  must(m.text.includes(`"'=1+1"`) && !/,"=1\+1"/.test(m.text), 'formula cell not neutralised');
+  const a = await admin('GET', '/api/audit/export.csv');
+  must(a.status === 200 && a.text.split('\r\n').length > lines.length, "admin export not wider than the member's");
+  return `member export: ${lines.length} rows, all theirs; "=1+1" exported as "'=1+1"`;
 });
 await check('member audit = own rows only; admin can filter by user (D9)', async () => {
   const m = await member('GET', '/api/audit?limit=50');
@@ -186,7 +242,7 @@ if (SHIP_URL && SHIP_TOKEN) {
       const lists = await Promise.all([1, 2, 3, 4].map(() => c.listTools(undefined, { cacheMode: 'bypass' }).then(r => r.tools.map(t => t.name))));
       names = lists.flat();
       if (lists.every(l => l.includes('shipcopy__get_order'))) break;
-      await new Promise(r => setTimeout(r, 300));
+      await new Promise(r => setTimeout(r, 1000));   // once a second: a slow wait must not use up the key's rate limit
     }
     await c.close();
     must(names.includes('shipcopy__get_order') && Date.now() - t0 < 15000, names.join(','));

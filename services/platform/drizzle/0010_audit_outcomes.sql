@@ -1,0 +1,2 @@
+ALTER TABLE "audit_events" DROP CONSTRAINT "audit_events_outcome_check";--> statement-breakpoint
+ALTER TABLE "audit_events" ADD CONSTRAINT "audit_events_outcome_check" CHECK ("audit_events"."outcome" in ('ok', 'tool_error', 'timeout', 'upstream_unreachable', 'rejected', 'denied', 'busy', 'pending', 'unknown'));

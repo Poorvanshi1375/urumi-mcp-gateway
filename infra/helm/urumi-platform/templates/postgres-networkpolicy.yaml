@@ -19,6 +19,13 @@ spec:
             matchLabels:
               app.kubernetes.io/instance: {{ .Release.Name }}
               app: platform
+        {{- if .Values.provisioner.enabled }}
+        # The provisioner, as its own restricted role (urumi_provisioner).
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app: provisioner
+        {{- end }}
       ports:
         - port: 5432
           protocol: TCP

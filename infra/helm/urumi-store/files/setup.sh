@@ -47,6 +47,12 @@ if [ "$current" != "$WOO_VERSION" ]; then
 fi
 wp plugin is-active woocommerce || wp plugin activate woocommerce
 log "WooCommerce $(wp plugin get woocommerce --field=version) active"
+# After a WordPress or WooCommerce version change, migrate their database tables here, in the Job,
+# rather than waiting for an administrator to open wp-admin (WooCommerce would otherwise run on
+# the old schema until then). Both are no-ops when already current.
+log "database upgrades"
+wp core update-db
+wpu wc update
 
 log "store settings"
 wp option update woocommerce_coming_soon no
@@ -75,6 +81,17 @@ while IFS='|' read -r sku name price; do
     log "  created $sku"
   fi
 done < /setup/products.txt
+
+# The REST key belongs to a dedicated shop_manager user, not the administrator (least privilege;
+# changes made through MCP are also attributed to it in WordPress). Its password is random and
+# never stored: nobody signs in as it. On an existing store the same key just changes owner.
+log "MCP service user ($WOO_KEY_USER, shop_manager)"
+if wp user get "$WOO_KEY_USER" --field=ID >/dev/null 2>&1; then
+  wp user set-role "$WOO_KEY_USER" shop_manager >/dev/null
+else
+  wp user create "$WOO_KEY_USER" "${WOO_KEY_USER}@mcp.invalid" --role=shop_manager --display_name="MCP service" \
+    --user_pass="$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32)" --porcelain >/dev/null
+fi
 
 log "REST API key"
 wp eval-file /setup/api-key.php

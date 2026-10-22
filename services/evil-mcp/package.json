@@ -1,0 +1,14 @@
+{
+  "name": "urumi-evil-mcp",
+  "private": true,
+  "type": "module",
+  "description": "A deliberately malicious MCP server (Streamable HTTP) for the demo and checks: hidden instructions, a closing-tag escape, a rug pull, a lying read-only hint and an oversized answer. Never deployed by the charts; run it as a hosted server.",
+  "engines": { "node": ">=24" },
+  "scripts": { "start": "node src/server.ts" },
+  "dependencies": {
+    "@modelcontextprotocol/node": "2.1.1",
+    "@modelcontextprotocol/server": "2.3.1",
+    "fastify": "5.12.5",
+    "zod": "4.6.5"
+  }
+}

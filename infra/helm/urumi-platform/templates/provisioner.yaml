@@ -1,0 +1,390 @@
+{{- /*
+The provisioner (T1-2/T1-3): the only pod of this platform with a Kubernetes token. Its rights end
+where this install's tenant namespaces end, and the API server enforces that (ValidatingAdmission-
+Policies), not only RBAC. Proven by the P0 spike (docs/internal/p0-spike) and tests/rbac-check.sh.
+Tenant namespaces are named mcp-<prefix> or store-<slug> and carry urumi.dev/managed-by and
+urumi.dev/platform=<this release's namespace>, so two installs can never touch each other's.
+*/}}
+{{- if .Values.provisioner.enabled }}
+{{- $ns := .Release.Namespace }}
+{{- $sa := printf "%s-provisioner" (include "urumi-platform.fullname" .) }}
+{{- $user := printf "system:serviceaccount:%s:%s" $ns $sa }}
+{{- $nsRole := printf "urumi-provisioner-%s" $ns }}
+{{- $tenantRole := printf "urumi-tenant-operator-%s" $ns }}
+{{- $images := .Values.provisioner.hosted.allowedImages }}
+{{- range $images }}
+{{- if not (regexMatch "^[a-z0-9.-]+(:[0-9]{1,5})?/[a-z0-9._/-]+$" .) }}
+{{- fail (printf "provisioner.hosted.allowedImages: %q is not <registry>/<path prefix>, e.g. docker.io/mcp/" .) }}
+{{- end }}
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $sa }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "provisioner") | nindent 4 }}
+---
+# Cluster-wide, but only for namespaces and for binding exactly the tenant role; the admission
+# policies below narrow both to this install's namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $nsRole }}
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "provisioner") | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, watch, create, patch, delete]
+  # To confirm a deleted store's volumes are released (H8).
+  - apiGroups: [""]
+    resources: [persistentvolumes]
+    verbs: [get]
+  # patch: server-side apply sends a PATCH (the rolebindings policy checks it as an UPDATE).
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [rolebindings]
+    verbs: [create, get, patch, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterroles]
+    verbs: [bind]
+    resourceNames: [{{ $tenantRole }}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $nsRole }}
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "provisioner") | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ $nsRole }} }
+subjects: [{ kind: ServiceAccount, name: {{ $sa }}, namespace: {{ $ns }} }]
+---
+# Bound by the provisioner inside one tenant namespace at a time (RoleBinding "urumi-provisioner"),
+# never cluster-wide. No roles or rolebindings: it cannot grant itself more.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $tenantRole }}
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "provisioner") | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets, configmaps, services, persistentvolumeclaims, serviceaccounts, resourcequotas, limitranges]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses, networkpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods, pods/log, events]
+    verbs: [get, list, watch]
+---
+# H3a: namespaces: mcp-*/store-*, managed and platform labels, restricted or baseline Pod Security,
+# on create and after every update; change or delete only this install's.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $nsRole }}-namespaces
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "provisioner") | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - { apiGroups: [""], apiVersions: [v1], operations: [CREATE, UPDATE, DELETE], resources: [namespaces] }
+  matchConditions:
+    - name: provisioner-only
+      expression: request.userInfo.username == {{ $user | quote }}
+  validations:
+    - expression: request.operation != "CREATE" || object.metadata.name.matches('^(mcp|store)-[a-z0-9]{2,12}$')
+      message: namespace name must be mcp-<prefix> or store-<slug>
+    - expression: >-
+        request.operation == "DELETE" ||
+        (has(object.metadata.labels) && object.metadata.labels[?'urumi.dev/managed-by'].orValue('') == 'urumi-provisioner'
+         && object.metadata.labels[?'urumi.dev/platform'].orValue('') == {{ $ns | squote }}
+         && object.metadata.labels[?'pod-security.kubernetes.io/enforce'].orValue('') in ['restricted', 'baseline'])
+      message: a provisioner namespace must keep urumi.dev/managed-by=urumi-provisioner, urumi.dev/platform={{ $ns }} and a restricted or baseline Pod Security level
+    - expression: >-
+        request.operation == "CREATE" ||
+        (has(oldObject.metadata.labels) && oldObject.metadata.labels[?'urumi.dev/managed-by'].orValue('') == 'urumi-provisioner'
+         && oldObject.metadata.labels[?'urumi.dev/platform'].orValue('') == {{ $ns | squote }})
+      message: the provisioner may only change or delete namespaces it manages for this install
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $nsRole }}-namespaces
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "provisioner") | nindent 4 }}
+spec: { policyName: {{ $nsRole }}-namespaces, validationActions: [Deny] }
+---
+# H3b: every namespaced write by the provisioner, of any kind, lands only in this install's
+# namespaces (RBAC alone would allow it wherever someone bound the tenant role).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $nsRole }}-namespaced-writes
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "provisioner") | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - { apiGroups: ["*"], apiVersions: ["*"], operations: [CREATE, UPDATE, DELETE], resources: ["*/*"], scope: Namespaced }
+  matchConditions:
+    - name: provisioner-only
+      expression: request.userInfo.username == {{ $user | quote }}
+  validations:
+    - expression: >-
+        has(namespaceObject.metadata.labels)
+        && namespaceObject.metadata.labels[?'urumi.dev/managed-by'].orValue('') == 'urumi-provisioner'
+        && namespaceObject.metadata.labels[?'urumi.dev/platform'].orValue('') == {{ $ns | squote }}
+      messageExpression: "'the provisioner may only write in namespaces it manages for this install, not ' + namespaceObject.metadata.name"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $nsRole }}-namespaced-writes
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "provisioner") | nindent 4 }}
+spec: { policyName: {{ $nsRole }}-namespaced-writes, validationActions: [Deny] }
+---
+# H3c: its role binding: one fixed name, the tenant role, exactly itself.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $nsRole }}-rolebindings
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "provisioner") | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - { apiGroups: [rbac.authorization.k8s.io], apiVersions: [v1], operations: [CREATE, UPDATE], resources: [rolebindings] }
+  matchConditions:
+    - name: provisioner-only
+      expression: request.userInfo.username == {{ $user | quote }}
+  validations:
+    - expression: object.metadata.name == 'urumi-provisioner'
+      message: the provisioner's role binding must be named urumi-provisioner
+    - expression: object.roleRef.kind == 'ClusterRole' && object.roleRef.name == {{ $tenantRole | squote }}
+      message: only the tenant-operator role may be bound
+    - expression: >-
+        size(object.subjects) == 1 && object.subjects[0].kind == 'ServiceAccount'
+        && object.subjects[0].name == {{ $sa | squote }} && object.subjects[0].namespace == {{ $ns | squote }}
+      message: only the provisioner itself may be the subject
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $nsRole }}-rolebindings
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "provisioner") | nindent 4 }}
+spec: { policyName: {{ $nsRole }}-rolebindings, validationActions: [Deny] }
+---
+# Workload shape: no host namespaces, hostPath or privileged containers; ClusterIP Services only.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $nsRole }}-workloads
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "provisioner") | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - { apiGroups: [""], apiVersions: [v1], operations: [CREATE, UPDATE], resources: [pods, services] }
+      - { apiGroups: [apps], apiVersions: [v1], operations: [CREATE, UPDATE], resources: [deployments, statefulsets] }
+      - { apiGroups: [batch], apiVersions: [v1], operations: [CREATE, UPDATE], resources: [jobs] }
+  matchConditions:
+    - name: provisioner-only
+      expression: request.userInfo.username == {{ $user | quote }}
+  variables:
+    - name: pod
+      expression: "object.kind == 'Pod' ? object.spec : (object.kind == 'Service' ? null : object.spec.template.spec)"
+  validations:
+    - expression: object.kind != 'Service' || !has(object.spec.type) || object.spec.type == 'ClusterIP'
+      message: only ClusterIP Services
+    - expression: >-
+        variables.pod == null || (
+          !(has(variables.pod.hostNetwork) && variables.pod.hostNetwork) &&
+          !(has(variables.pod.hostPID) && variables.pod.hostPID) &&
+          !(has(variables.pod.hostIPC) && variables.pod.hostIPC) &&
+          (!has(variables.pod.volumes) || variables.pod.volumes.all(v, !has(v.hostPath))) &&
+          variables.pod.containers.all(c, !(has(c.securityContext) && has(c.securityContext.privileged) && c.securityContext.privileged)) &&
+          (!has(variables.pod.initContainers) || variables.pod.initContainers.all(c, !(has(c.securityContext) && has(c.securityContext.privileged) && c.securityContext.privileged))))
+      message: no host namespaces, hostPath or privileged containers
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $nsRole }}-workloads
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "provisioner") | nindent 4 }}
+spec: { policyName: {{ $nsRole }}-workloads, validationActions: [Deny] }
+---
+# H4: in hosted-server namespaces (mcp-*), every container, init and ephemeral container image starts
+# with an allowed prefix. The list is written into the expression from the same values the API and
+# the provisioner check (a params ConfigMap never resolved on k3s v1.35.5, and a missing param
+# refused workloads in every namespace). Images are written in full, so a short form fails.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $nsRole }}-images
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "provisioner") | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - { apiGroups: [""], apiVersions: [v1], operations: [CREATE, UPDATE], resources: [pods, pods/ephemeralcontainers] }
+      - { apiGroups: [apps], apiVersions: [v1], operations: [CREATE, UPDATE], resources: [deployments, statefulsets] }
+      - { apiGroups: [batch], apiVersions: [v1], operations: [CREATE, UPDATE], resources: [jobs] }
+  matchConditions:
+    - name: provisioner-only
+      expression: request.userInfo.username == {{ $user | quote }}
+    - name: hosted-namespaces
+      expression: request.namespace.startsWith('mcp-')
+  variables:
+    - name: spec
+      expression: "object.kind == 'Pod' ? object.spec : object.spec.template.spec"
+    - name: images
+      expression: >-
+        variables.spec.containers.map(c, c.image) +
+        (has(variables.spec.initContainers) ? variables.spec.initContainers.map(c, c.image) : []) +
+        (has(variables.spec.ephemeralContainers) ? variables.spec.ephemeralContainers.map(c, c.image) : [])
+    - name: allowed
+      expression: {{ toJson $images | quote }}
+  validations:
+    - expression: "variables.images.all(i, variables.allowed.exists(p, i.startsWith(p)))"
+      messageExpression: "'image not on the allowlist: ' + variables.images.filter(i, !variables.allowed.exists(p, i.startsWith(p))).join(', ')"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $nsRole }}-images
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "provisioner") | nindent 4 }}
+spec: { policyName: {{ $nsRole }}-images, validationActions: [Deny] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $sa }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "provisioner") | nindent 4 }}
+spec:
+  # Work is claimed per row with a lease (H1), so a second replica would be safe; one is enough.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "urumi-platform.componentSelector" (dict "ctx" . "component" "provisioner") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "provisioner") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $sa }}
+      # The one pod that holds a Kubernetes token (chart-invariants allows exactly this Deployment).
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: provisioner
+          image: {{ include "urumi-platform.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["node", "src/provisioner.ts"]
+          env:
+            # Its own database role (urumi_provisioner), never the app's or the owner's.
+            - { name: PGHOST, value: {{ include "urumi-platform.postgresHost" . | quote }} }
+            - { name: PGPORT, value: "5432" }
+            - { name: PGDATABASE, value: {{ .Values.postgres.database | quote }} }
+            - { name: PGUSER, value: {{ required "postgres.provisionerUser is required for the provisioner" .Values.postgres.provisionerUser | quote }} }
+            - name: PGPASSWORD
+              valueFrom: { secretKeyRef: { name: {{ include "urumi-platform.secretName" . }}, key: provisioner-db-password } }
+            - { name: RELEASE_NAMESPACE, value: {{ $ns | quote }} }
+            - { name: RELEASE_NAME, value: {{ .Release.Name | quote }} }
+            - { name: PROVISIONER_SERVICE_ACCOUNT, value: {{ $sa | quote }} }
+            - { name: TENANT_ROLE, value: {{ $tenantRole | quote }} }
+            - { name: ALLOWED_IMAGES, value: {{ join "," $images | quote }} }
+            - { name: HEALTH_PORT, value: "8081" }
+            # Hosted servers' secret env and the bearer token it registers are encrypted like every
+            # upstream credential, with the platform's key.
+            - name: PLATFORM_ENCRYPTION_KEY
+              valueFrom: { secretKeyRef: { name: {{ include "urumi-platform.secretName" . }}, key: encryption-key } }
+          ports:
+            - { name: health, containerPort: 8081 }
+          readinessProbe:
+            httpGet: { path: /readyz, port: health }
+            periodSeconds: 10
+          livenessProbe:
+            # The reconcile loop ticked within 60 s (H11): a stuck loop gets the pod restarted.
+            httpGet: { path: /healthz, port: health }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.provisioner.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+---
+# The provisioner accepts no connections (its probes come from the kubelet) and may connect only to
+# DNS, Postgres and the Kubernetes API. It never reaches a tenant pod (H7), an MCP server or the
+# internet.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $sa }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "provisioner") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "urumi-platform.componentSelector" (dict "ctx" . "component" "provisioner") | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ .Values.networkPolicy.dns.namespace }} } }
+          podSelector: { matchLabels: {{ .Values.networkPolicy.dns.podLabels | toJson }} }
+      ports: [ { port: 53, protocol: UDP }, { port: 53, protocol: TCP } ]
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "urumi-platform.componentSelector" (dict "ctx" . "component" "postgres") | nindent 14 }}
+      ports: [ { port: 5432, protocol: TCP } ]
+    # The Kubernetes API: the kubernetes Service (443) is translated to the API server's own address
+    # and port before the policy applies, so the rule names those: the addresses from the cluster's
+    # "kubernetes" EndpointSlice at install time, unless provisioner.apiServer.cidrs is set. (With no
+    # cluster to ask, e.g. helm template, it falls back to the port on any address.)
+    {{- $api := .Values.provisioner.apiServer.cidrs }}
+    {{- if not $api }}
+    {{- $slice := lookup "discovery.k8s.io/v1" "EndpointSlice" "default" "kubernetes" }}
+    {{- range (dig "endpoints" list $slice) }}
+    {{- range .addresses }}
+    {{- $api = append $api (printf "%s/%s" . (ternary "128" "32" (contains ":" .))) }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    - {{- with $api }}
+      to:
+        {{- range . }}
+        - ipBlock: { cidr: {{ . }} }
+        {{- end }}
+      {{- end }}
+      ports:
+        {{- range .Values.provisioner.apiServer.ports }}
+        - { port: {{ . }}, protocol: TCP }
+        {{- end }}
+{{- end }}

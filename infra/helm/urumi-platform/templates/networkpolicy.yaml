@@ -16,8 +16,12 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
   policyTypes: ["Ingress"]
 ---
-# The gateway (dashboard, /api, /mcp) accepts only the Ingress controller. Its egress stays open:
-# it calls admin-registered MCP servers anywhere and the LLM API (URLs are checked by the SSRF guard).
+# The gateway (dashboard, /api, /mcp) accepts only the Ingress controller. Its egress (unless
+# networkPolicy.gatewayEgress.enabled is false): DNS, Postgres, our MCP servers, and public addresses
+# on 80/443 (admin-registered servers, DeepWiki, the LLM API). Private, CGNAT and link-local ranges
+# are excepted, so the cluster, the node, the Kubernetes API and cloud metadata are unreachable even
+# if the SSRF guard had a bug. In-cluster servers an admin registers need a rule in
+# networkPolicy.gatewayEgress.extra as well as an SSRF allowlist entry.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -29,7 +33,42 @@ spec:
   podSelector:
     matchLabels:
       {{- include "urumi-platform.componentSelector" (dict "ctx" . "component" "platform") | nindent 6 }}
-  policyTypes: ["Ingress"]
+  policyTypes: {{ $np.gatewayEgress.enabled | ternary (list "Ingress" "Egress") (list "Ingress") | toJson }}
+  {{- if $np.gatewayEgress.enabled }}
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ $np.dns.namespace }} } }
+          podSelector: { matchLabels: {{ $np.dns.podLabels | toJson }} }
+      ports: [ { port: 53, protocol: UDP }, { port: 53, protocol: TCP } ]
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "urumi-platform.componentSelector" (dict "ctx" . "component" "postgres") | nindent 14 }}
+      ports: [ { port: 5432, protocol: TCP } ]
+    {{- range $c := list "woo-mcp" "ship-mcp" }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "urumi-platform.componentSelector" (dict "ctx" $ "component" $c) | nindent 14 }}
+      ports: [ { port: 8080, protocol: TCP } ]
+    {{- end }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: {{ $np.gatewayEgress.exceptCidrs | toJson }}
+      ports: {{ $np.gatewayEgress.publicPorts | toJson }}
+    {{- if .Values.provisioner.enabled }}
+    # Hosted servers and bonus stores (T1-2/T1-3): only the MCP pod in a namespace this install's
+    # provisioner manages, never a tenant's database or WordPress. Hosted ports are configurable.
+    - to:
+        - namespaceSelector: { matchLabels: { urumi.dev/managed-by: urumi-provisioner, urumi.dev/platform: {{ .Release.Namespace }} } }
+          podSelector: { matchLabels: { urumi.dev/role: mcp } }
+      ports: [ { port: 1024, endPort: 65535, protocol: TCP } ]
+    {{- end }}
+    {{- with $np.gatewayEgress.extra }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
   ingress:
     - from:
         - namespaceSelector:

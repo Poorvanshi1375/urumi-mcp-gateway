@@ -57,13 +57,14 @@ Everything except DeepWiki and Gemini runs in the cluster, in namespace `urumi`.
 | Node.js | 24 | only for the check scripts and the demo-data script |
 | make, openssl, curl | any | |
 | Gemini API key | optional | for the chat agent; free key from Google AI Studio. Everything else works without it |
+| Groq API key | optional | a second LLM provider for chat when Gemini is down, rate-limited or out of quota; free key from console.groq.com. Chat also works with only this key |
 
 ### Install
 
 ```bash
 git clone <this repo> urumi-mcp-gateway && cd urumi-mcp-gateway
 make cluster                                   # k3d cluster "urumi-local": Traefik on :9080, NetworkPolicy enforced
-make secrets GEMINI_KEY_FILE=~/gemini.key      # creates the Kubernetes Secrets (omit the key file to skip chat)
+make secrets GEMINI_KEY_FILE=~/gemini.key FALLBACK_KEY_FILE=~/groq.key   # creates the Kubernetes Secrets (omit a key file to skip it)
 make install                                   # builds the 3 images, installs the store chart, then the platform chart
 make hooks                                     # optional: pre-commit check that refuses committed secrets
 ```
@@ -116,6 +117,18 @@ claude          # then /mcp shows "urumi" connected and its tools
 ```
 Tools appear as `mcp__urumi__woo__list_orders` and so on. Claude Code follows tool-list changes live: disable a server in the dashboard and its tools disappear from the session within a second or two.
 
+**Claude Code with a browser sign-in instead of a key** (OAuth, MCP authorization spec):
+```bash
+claude mcp add --transport http urumi http://localhost:9080/mcp      # no header
+claude          # in /mcp, authenticate urumi: the browser opens the dashboard; sign in and Allow
+```
+The whole flow (discovery, registration, PKCE, consent, tokens, refresh, revocation) is tested with the MCP SDK's own OAuth client (`test/oauth-check.mjs`); the interactive Claude Code sign-in is a manual step. The app then appears under **API keys → Connected apps**, where it can be disconnected; its calls are audited under your name, "via Claude Code (OAuth)". MCP clients accept OAuth over plain HTTP only on localhost, which is why the local URL works; on the VPS it is https.
+
+For many servers, connect in tool search mode instead: the client gets two tools, `gateway__search_tools` and `gateway__call_tool`, and finds the rest by keyword (same permissions and audit):
+```bash
+claude mcp add --transport http urumi-search "http://localhost:9080/mcp?mode=search" --header "Authorization: Bearer urk_..."
+```
+
 **MCP Inspector** (CLI tested with 2.8.0):
 ```bash
 npx @modelcontextprotocol/inspector@2.8.0 --cli http://localhost:9080/mcp --transport http \
@@ -136,7 +149,7 @@ Tool names are `<server prefix>__<tool>`, for example `woo__get_order` and `ship
 
 ### Use the chat agent
 
-Open **Chat** in the dashboard and ask, for example, "What orders came in today?" or "Create a product called Urumi Tote Bag priced at 799". Each tool call appears as a card with its arguments, result and duration. The agent (Gemini, `gemini-3.5-flash` with `gemini-3.5-flash-lite` as fallback) acts as the signed-in user: it only gets that user's tools, and every call is in the audit log under that user with source `chat`. It needs the `platform-llm` Secret (`make secrets GEMINI_KEY_FILE=...`).
+Open **Chat** in the dashboard and ask, for example, "What orders came in today?" or "Create a product called Urumi Tote Bag priced at 799". Each tool call appears as a card with its arguments, result and duration. Anything that changes data (creating a product, changing an order's status) is shown first as a card with the exact call and runs only when you click **Confirm** (`platform.chat.confirmWrites`, on in both values files); an admin can change per tool, on the Servers page, whether chat asks. The agent (Gemini, `gemini-3.5-flash` with `gemini-3.5-flash-lite` as fallback, then optionally Groq `openai/gpt-oss-120b`) acts as the signed-in user: it only gets that user's tools, and every call is in the audit log under that user with source `chat`. If Gemini is overloaded, rate-limited, out of quota or too slow before any tool has run, the answer comes from Groq (the page header names the model that answered) and Gemini rests for 60 s. It needs the `platform-llm` Secret (`make secrets GEMINI_KEY_FILE=... FALLBACK_KEY_FILE=...`); a key given this way replaces the stored one, so a key with a used-up quota can be swapped (then `kubectl rollout restart -n urumi deploy/platform`).
 
 ### Manage the team (admins)
 
@@ -154,12 +167,18 @@ LETSENCRYPT_EMAIL=you@example.com infra/scripts/deploy-ec2.sh <public-ip> ~/.ssh
 ```
 
 The script runs from the laptop, over SSH, and is safe to re-run:
-1. installs k3s v1.35.5 (same as local) and copies Helm to the node;
+1. installs k3s v1.35.5 (same as local) with `--secrets-encryption` (Kubernetes Secrets encrypted at rest in the k3s datastore), puts Traefik on the node's ports 80/443 so each client's real address reaches the gateway (`infra/k3s/traefik-hostport.yaml`), and copies Helm to the node;
 2. copies our three images (the tags running locally) into k3s's containerd;
 3. ships the charts as committed in git (`git archive HEAD`), never the working tree;
 4. runs `scripts/secrets.sh` on the node (the Gemini key travels through a mode-600 temp file that is deleted right after);
 5. installs cert-manager v1.21.2 and a Let's Encrypt ClusterIssuer (HTTP-01 through Traefik);
 6. installs the store and platform charts with `values-prod.yaml` and the host names below.
+
+**A node installed before Secrets encryption was added** (the flag only applies to a new install): turn it on once, on the node. It causes about 30 seconds of API downtime while k3s restarts; the sites keep running.
+```bash
+sudo k3s secrets-encrypt enable && sudo systemctl restart k3s
+sudo k3s secrets-encrypt reencrypt && sudo k3s secrets-encrypt status   # "Encryption Status: Enabled"
+```
 
 URLs: `https://store.<ip>.nip.io/shop/`, `https://app.<ip>.nip.io/` and `https://app.<ip>.nip.io/mcp`. nip.io resolves a name to the IP inside it, so no DNS setup is needed; with a real domain, set the hosts instead.
 
@@ -197,23 +216,43 @@ Normal upgrades: `make install` locally, or re-run `deploy-ec2.sh`. Volumes and 
 (cd services/platform && npm ci) && (cd services/woo-mcp && npm ci)    # once, for the check scripts
 make verify          # secret scans + scripts/verify-dod.sh
 scripts/verify-dod.sh --all     # also: Gemini chat, real Claude Code and MCP Inspector sessions, slow upstream
+make netpol-check    # only the NetworkPolicy probes, about 30 s: run before a demo (a Docker restart can leave policies unenforced)
+```
+Without a cluster (these also run in CI, `.github/workflows/ci.yml`):
+```bash
+# CI also builds our three images and scans them with Trivy: a fixable CRITICAL fails the build; HIGH and
+# third-party images (postgres, mysql, wordpress) are reported only.
+node scripts/chart-invariants.mjs   # rendered charts: probes, limits, non-root, API token for the provisioner only, RBAC and admission policies, no Secrets from Helm, internals ClusterIP only
+node scripts/values-diff.mjs        # every field that differs between values-local.yaml and values-prod.yaml, and nothing unexpected
+(cd services/platform && node test/unit-check.mjs)
 ```
 
-`scripts/verify-dod.sh` runs against the live cluster and checks the definition of done end to end: storefront and WooCommerce REST; PVCs, probes, limits and security contexts on every container; NetworkPolicies (pods without the gateway's labels cannot reach the MCP servers, databases, WordPress or `/metrics`; the MCP servers cannot reach anything but what they need); keys rejected when missing, invalid or revoked; every enabled server's tools listed with namespaced names; restricted tools hidden and denied; an orders question and a two-server task; disabling a server; killing an upstream pod and stopping it entirely; two-replica behaviour and rate limits; the audit and activity logs. It uses temporary users and removes them and their data afterwards, so it can run on a demo system. Latest results: local `--all` 34 passed, VPS (over HTTPS) 27 passed, 0 failed.
+`scripts/verify-dod.sh` runs against the live cluster and checks the definition of done end to end: storefront and WooCommerce REST; PVCs, probes, limits and security contexts on every container; NetworkPolicies (pods without the gateway's labels cannot reach the MCP servers, databases, WordPress or `/metrics`; the MCP servers and the gateway cannot reach anything but what they need, and no pod holds a Kubernetes API token); keys rejected when missing, invalid or revoked; every enabled server's tools listed with namespaced names; restricted tools hidden and denied; an orders question and a two-server task; disabling a server; killing an upstream pod and stopping it entirely; two-replica behaviour and rate limits; the audit and activity logs. It uses temporary users and removes them and their data afterwards, so it can run on a demo system. Latest results on k3d: `make verify` 65 passed, 0 failed (the provisioner's fence: `rbac-check` 49 of 49; pinning, OAuth, scaling and network checks included); in `--all`, `hosted-check` 6 of 6 and `evil-check` 5 of 5, `credential-isolation-check` and the chat checks pass; the failures seen in `--all` runs come from outside services (DeepWiki connect timeouts, an LLM provider's rate limit or overload). The VPS result (27 passed, 0 failed, over HTTPS) is from the previous version.
 
 ## Stand-out items and where to find them
 
 | Item from the assignment | What we built | Where |
 |---|---|---|
-| 1. Production-like VPS deployment | k3s on EC2 with the same charts, TLS from Let's Encrypt, values-only differences | `infra/scripts/deploy-ec2.sh`, `values-prod.yaml`, [VPS section](#deploy-to-a-vps-k3s) |
-| 2. Tool permissions | Per-role rules per server and tool; restricted tools hidden from listing and refused (audited `denied`) for MCP clients and the chat agent alike; editable per tool in the dashboard | `services/platform/src/services/permissions.ts`, `src/gateway/mcp.ts` |
-| 4. Handling many tools | Tool search mode: `/mcp?mode=search` exposes `gateway__search_tools` and `gateway__call_tool` (behind `platform.features.toolSearch`) | `src/gateway/mcp.ts` |
-| 6. Security hardening | SSRF guard (checked at registration and on every connection), default-deny NetworkPolicies with egress lockdown for MCP servers, every container non-root with a read-only root filesystem, upstream credentials encrypted with AES-256-GCM, tool pinning against changed tool descriptions (behind `platform.features.toolPinning`), committed-secret check | `src/lib/ssrf.ts`, `templates/networkpolicy.yaml`, `src/services/pins.ts`, `scripts/check-secrets.sh` |
-| 7. Scaling | Stateless MCP; 2 replicas locally, HPA 2 to 4 on the VPS, PodDisruptionBudget; per-key and per-user rate limits; shared sign-in throttling; replicas synchronised through Postgres NOTIFY | `templates/platform-scaling.yaml`, `src/lib/ratelimit.ts` |
-| 8. Observability | Prometheus `/metrics` on a private port (calls, errors and latency per server, upstream up, rejected requests); unreachable reasons shown in the dashboard; activity log | `src/lib/metrics.ts` |
+| 1. Production-like VPS deployment | k3s on EC2 with the same charts, TLS from Let's Encrypt, values-only differences (listed field by field by `scripts/values-diff.mjs`) | `infra/scripts/deploy-ec2.sh`, `values-prod.yaml`, [VPS section](#deploy-to-a-vps-k3s) |
+| 2. Tool permissions | Per-role rules per server and tool; restricted tools hidden from listing and refused (audited `denied`) for MCP clients and the chat agent alike; editable per tool in the dashboard; members default to tools the server marks read-only (`platform.permissions.memberDefault: readOnly` in both values files), and only for servers whose hints the gateway trusts (the release's own, or ones an admin vouches for), so a new server's tools start admin-only | `services/platform/src/services/permissions.ts`, `src/gateway/mcp.ts` |
+| 3. OAuth on the gateway | MCP authorization spec: discovery (RFC 9728, 8414) from the 401, dynamic client registration, PKCE S256, consent in the dashboard, tokens bound to `/mcp` (RFC 8707), rotating refresh tokens with reuse detection, Connected apps with Disconnect. Flag `platform.features.oauth`, on in both values files | `src/services/oauth.ts`, `src/api/oauth.ts`, `test/oauth-check.mjs` |
+| 4. Handling many tools | Tool search mode: `/mcp?mode=search` exposes `gateway__search_tools` and `gateway__call_tool`. Flag `platform.features.toolSearch`, on in `values-local.yaml` and `values-prod.yaml` | `src/gateway/mcp.ts` |
+| 5. Hosted MCP servers | An admin gives a container image on the Hosted servers page; the provisioner runs it in its own namespace `mcp-<prefix>` with its own Secret (secret env encrypted, a bearer token), quota and limits, restricted Pod Security, and default-deny NetworkPolicies (only the gateway reaches it; it reaches nothing unless allowed the internet), registers it (pinned, hints untrusted), and on delete removes the tools first, then the namespace. The provisioner is the only pod with a Kubernetes token, fenced by RBAC and five admission policies. Details: [docs/provisioner.md](docs/provisioner.md) | `src/provisioner.ts`, `src/provision/`, `templates/provisioner.yaml`, `test/hosted-check.mjs`, `tests/rbac-check.sh` |
+| 6. Security hardening | SSRF guard (checked at registration and on every connection; the platform's own hosts and public IP are refused too), default-deny NetworkPolicies with egress lockdown for the MCP servers and the gateway (`make netpol-check`), every container non-root with a read-only root filesystem, only the provisioner holds a Kubernetes API token, fenced by namespace-scoped RBAC and five admission policies (`tests/rbac-check.sh`: 49 live cases), upstream credentials encrypted with AES-256-GCM, tool pinning: a tool whose title, description, schemas or annotations change is hidden until an admin approves it (flag `platform.features.toolPinning`, on in both values files), hidden-text stripping (TAG and other invisible characters) in descriptions and schemas, no redirects followed to other hosts, committed-secret check | `src/lib/ssrf.ts`, `templates/networkpolicy.yaml`, `src/services/pins.ts`, `scripts/check-secrets.sh` |
+| 7. Scaling | Stateless MCP; 2 replicas locally, HPA 2 to 4 on the VPS, PodDisruptionBudget; per-key and per-user rate limits exact across replicas (token buckets in Postgres); at most 8 concurrent calls per upstream; shared sign-in throttling; replicas synchronised through Postgres NOTIFY | `templates/platform-scaling.yaml`, `src/lib/ratelimit.ts` |
+| 8. Observability | Prometheus `/metrics` on a private port (calls, errors and latency per server, upstream up, in-flight calls, rejected requests); per-server calls, error rate and p50/p95 latency on the Servers page; unreachable reasons, and the last outage after recovery; a write-ahead audit log (no call without a row) with argument hashes and a spreadsheet-safe CSV export; one request id from the client (`x-request-id`) through the audit row to the MCP server's log; activity log | `src/lib/metrics.ts` |
 | 9. Upgrades and rollback | Scripted broken-image upgrade and `helm rollback` with zero failed requests | `scripts/upgrade-rollback-demo.sh` |
 
-Not attempted: OAuth on the gateway (3), hosted MCP servers by container image (5), and the multi-store bonus.
+Also built, beyond the list:
+
+| What | Why it matters | Where |
+|---|---|---|
+| Chat asks before any write | Anything that may change data becomes a proposal the user confirms; prompt injection can make the agent propose a change, never make one. The confirmed call goes through the same permission check and audit (`platform.chat.confirmWrites`) | `src/chat/agent.ts`, `src/services/proposals.ts` |
+| Read-only hints only from trusted servers | A server's `readOnlyHint` is a claim; it counts only for the release's own servers or ones an admin vouches for, so a hostile server cannot label its tools read-only to reach members or skip confirmation | `src/gateway/upstream-manager.ts` |
+| LLM fallback | Chat moves to a second provider (Groq) when Gemini is down, rate-limited or out of quota, only before any tool has run, so a write never runs twice | `src/chat/providers.ts` |
+| Append-only audit | The gateway's database role can add and complete audit rows but cannot delete or rewrite them; migrations run as the owner | `src/db/migrate.ts` |
+
+The multi-store bonus (stores created and deleted from the dashboard, each in its own namespace) is in progress on the same provisioner.
 
 ## Repository layout
 
@@ -232,4 +271,5 @@ tests                    demo reset, test order, in-cluster MCP smoke tests, rea
 
 - [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md): architecture, aggregation and routing, failure handling, production changes
 - [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md): credentials, token pass-through, untrusted upstreams, what members can do
+- [docs/provisioner.md](docs/provisioner.md): hosted MCP servers and bonus stores, the provisioner and its fence
 - [services/woo-mcp/README.md](services/woo-mcp/README.md): how woo-mcp talks to the store, and why

@@ -11,7 +11,7 @@ store:
   adminEmail: admin@example.com
   country: "IN:KA"
   currency: INR
-  timezone: Asia/Kolkata   # WordPress timezone: "orders today" for the agent and admins means today in India
+  timezone: Asia/Kolkata   # WordPress timezone: woo-mcp resolves "today" in it (get_store_info, created_on: today)
   # Seeded once per SKU by the setup Job (idempotent).
   seedProducts:
     - { sku: URUMI-TSHIRT, name: "Urumi T-Shirt", price: "499" }
@@ -24,6 +24,9 @@ woocommerce:
   version: "11.2.1"
   # The setup Job creates/updates one read_write REST key with this description.
   apiKeyDescription: urumi-mcp
+  # The WordPress user that owns the REST key: created by the setup Job as a shop_manager (never an
+  # administrator), so the key carries shop-manager rights only.
+  apiKeyUser: mcp-service
 
 # Credentials come from a Secret this chart never creates, so no secret value is ever in values
 # or in Helm's release history. scripts/secrets.sh creates it (keys: mysql-root-password,

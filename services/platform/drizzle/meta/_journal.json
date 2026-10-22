@@ -57,6 +57,76 @@
       "when": 1792250239872,
       "tag": "0007_login_failures",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1792339880368,
+      "tag": "0008_oauth",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1792341463733,
+      "tag": "0009_rate_buckets",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1792341902759,
+      "tag": "0010_audit_outcomes",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1792342102115,
+      "tag": "0011_seed_deepwiki_member",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1792342262480,
+      "tag": "0012_audit_args_hash",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1792343611239,
+      "tag": "0013_audit_request_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1792678483052,
+      "tag": "0014_upstream_trust_annotations",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1792679233467,
+      "tag": "0015_chat_proposals",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1792679244696,
+      "tag": "0016_seed_deepwiki_no_confirm",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1792694043869,
+      "tag": "0017_hosted_and_stores",
+      "breakpoints": true
     }
   ]
 }

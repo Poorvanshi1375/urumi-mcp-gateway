@@ -1,17 +1,20 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowUp, ChevronDown, ChevronRight, Loader2, RotateCcw, Square } from 'lucide-react';
-import { api, usableTools, useMe, useServers } from '../api';
+import { useQueryClient } from '@tanstack/react-query';
+import { ArrowUp, ChevronDown, ChevronRight, Loader2, RotateCcw, ShieldQuestion, Square } from 'lucide-react';
+import { usableTools, useChatStatus, useMe, useServers } from '../api';
 import { Markdown } from '../markdown';
 import { Button, ErrorNote, PageHeader, Pill } from '../ui';
 
-type ToolStep = { id: string; name: string; args: unknown; running: boolean; outcome?: string; durationMs?: number; preview?: string; isError?: boolean };
-type Msg = { role: 'user'; text: string } | { role: 'assistant'; text: string; tools: ToolStep[]; error?: string; done: boolean };
+type ToolStep = { id: string; name: string; args: unknown; running: boolean; outcome?: string; durationMs?: number; preview?: string; isError?: boolean; reused?: boolean };
+// A write the agent wants to make, waiting for this user's click (platform.chat.confirmWrites).
+type Proposal = { id: string; name: string; args: unknown; summary: string; state: 'waiting' | 'running' | 'confirmed' | 'declined' | 'expired'; note?: string };
+type Msg = { role: 'user'; text: string } | { role: 'assistant'; text: string; tools: ToolStep[]; error?: string; done: boolean; proposal?: Proposal };
 type Event =
   | { type: 'model'; model: string }
   | { type: 'tool_start'; id: string; name: string; args: unknown }
-  | { type: 'tool_end'; id: string; name: string; outcome: string; durationMs: number; preview: string; isError: boolean }
-  | { type: 'text'; text: string } | { type: 'done'; steps: number } | { type: 'error'; message: string };
+  | { type: 'tool_end'; id: string; name: string; outcome: string; durationMs: number; preview: string; isError: boolean; reused?: boolean }
+  | { type: 'confirm'; id: string; name: string; args: unknown; summary: string }
+  | { type: 'text'; text: string } | { type: 'done'; steps: number; awaitingConfirmation?: boolean } | { type: 'error'; message: string };
 
 // adminOnly: needs a tool members cannot use by default (create_product, update_order_status).
 const SUGGESTIONS = [
@@ -37,7 +40,7 @@ export function Chat() {
   const me = useMe();
   const uid = me.data!.id;
   const servers = useServers();
-  const status = useQuery({ queryKey: ['chat-status'], queryFn: () => api<{ enabled: boolean; model: string | null; tools: number }>('GET', '/api/chat/status') });
+  const status = useChatStatus();
   const qc = useQueryClient();
   const [msgs, setMsgs] = useState<Msg[]>(() => load(uid));
   const [input, setInput] = useState('');
@@ -51,44 +54,76 @@ export function Chat() {
   const update = (fn: (a: Extract<Msg, { role: 'assistant' }>) => void) =>
     setMsgs(prev => { const next = [...prev]; const last = { ...(next.at(-1) as Extract<Msg, { role: 'assistant' }>) }; last.tools = [...last.tools]; fn(last); next[next.length - 1] = last; return next; });
 
+  // Read one SSE answer into the last assistant message. append: add the text after what is there
+  // (the result of a confirmed write follows the message that asked for it).
+  async function stream(res: Response, append = false) {
+    if (!res.ok || !res.body) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error ?? `Chat failed (${res.status})`);
+    }
+    const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const chunk = buf.slice(0, idx); buf = buf.slice(idx + 2);
+        if (!chunk.startsWith('data: ')) continue;
+        const e = JSON.parse(chunk.slice(6)) as Event;
+        if (e.type === 'model') setModel(e.model);
+        else if (e.type === 'tool_start') update(a => { a.tools.push({ id: e.id, name: e.name, args: e.args, running: true }); });
+        else if (e.type === 'tool_end') update(a => { a.tools = a.tools.map(t => t.id === e.id ? { ...t, running: false, outcome: e.outcome, durationMs: e.durationMs, preview: e.preview, isError: e.isError, reused: e.reused } : t); });
+        else if (e.type === 'confirm') update(a => { a.proposal = { id: e.id, name: e.name, args: e.args, summary: e.summary, state: 'waiting' }; });
+        else if (e.type === 'text') update(a => { a.text = append && a.text ? `${a.text}\n\n${e.text}` : e.text; });
+        else if (e.type === 'error') update(a => { a.error = e.message; });
+      }
+    }
+  }
+  const finish = () => {
+    update(a => { a.done = true; a.tools = a.tools.map(t => t.running ? { ...t, running: false, outcome: 'stopped' } : t); });
+    abort.current = null;
+    void qc.invalidateQueries({ queryKey: ['overview'] });
+  };
+  const failed = (e: unknown) => update(a => { a.error = (e as Error).name === 'AbortError' ? 'Stopped.' : (e as Error).message; });
+
   async function send(text: string) {
     const question = text.trim();
     if (!question || busy) return;
     const history = [...msgs.filter(m => m.role === 'user' || (m.role === 'assistant' && m.done && !m.error && m.text)).map(m => ({ role: m.role, text: m.text })), { role: 'user' as const, text: question }];
-    setMsgs(prev => [...prev, { role: 'user', text: question }, { role: 'assistant', text: '', tools: [], done: false }]);
+    // Sending a new message declines a write still waiting (the server does the same).
+    setMsgs(prev => [...prev.map(m => m.role === 'assistant' && m.proposal?.state === 'waiting' ? { ...m, proposal: { ...m.proposal, state: 'declined' as const, note: 'Declined: you sent a new message.' } } : m),
+      { role: 'user', text: question }, { role: 'assistant', text: '', tools: [], done: false }]);
     setInput('');
     const ac = new AbortController(); abort.current = ac;
     try {
-      const res = await fetch('/api/chat', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ messages: history.slice(-40) }), signal: ac.signal });
-      if (!res.ok || !res.body) {
+      await stream(await fetch('/api/chat', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ messages: history.slice(-40) }), signal: ac.signal }));
+    } catch (e) { failed(e); } finally { finish(); }
+  }
+
+  // Confirm runs the stored call and streams its result into the same message; Cancel answers at
+  // once, without the model. Only the last message can hold a waiting proposal.
+  async function decide(p: Proposal, decision: 'confirm' | 'reject') {
+    const req = () => fetch(`/api/chat/proposals/${p.id}`, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision }), signal: ac.signal });
+    const ac = new AbortController(); abort.current = ac;
+    update(a => { a.done = false; a.proposal = { ...p, state: 'running' }; });
+    try {
+      const res = await req();
+      if (res.status === 409 || res.status === 410 || res.status === 404) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.error ?? `Chat failed (${res.status})`);
-      }
-      const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let idx;
-        while ((idx = buf.indexOf('\n\n')) >= 0) {
-          const chunk = buf.slice(0, idx); buf = buf.slice(idx + 2);
-          if (!chunk.startsWith('data: ')) continue;
-          const e = JSON.parse(chunk.slice(6)) as Event;
-          if (e.type === 'model') setModel(e.model);
-          else if (e.type === 'tool_start') update(a => { a.tools.push({ id: e.id, name: e.name, args: e.args, running: true }); });
-          else if (e.type === 'tool_end') update(a => { a.tools = a.tools.map(t => t.id === e.id ? { ...t, running: false, outcome: e.outcome, durationMs: e.durationMs, preview: e.preview, isError: e.isError } : t); });
-          else if (e.type === 'text') update(a => { a.text = e.text; });
-          else if (e.type === 'error') update(a => { a.error = e.message; });
-        }
+        update(a => { a.proposal = { ...p, state: res.status === 410 ? 'expired' : 'declined', note: err.error ?? 'This can no longer be confirmed.' }; });
+      } else if (decision === 'reject') {
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.error ?? `Failed (${res.status})`);
+        update(a => { a.proposal = { ...p, state: 'declined' }; a.text = `${a.text}\n\n${body.text}`; });
+      } else {
+        update(a => { a.proposal = { ...p, state: 'confirmed' }; });
+        await stream(res, true);
       }
     } catch (e) {
-      if ((e as Error).name === 'AbortError') update(a => { a.error = 'Stopped.'; });
-      else update(a => { a.error = (e as Error).message; });
-    } finally {
-      update(a => { a.done = true; a.tools = a.tools.map(t => t.running ? { ...t, running: false, outcome: 'stopped' } : t); });
-      abort.current = null;
-      void qc.invalidateQueries({ queryKey: ['overview'] });
-    }
+      update(a => { if (a.proposal?.state === 'running') a.proposal = { ...p, state: 'waiting' }; });
+      failed(e);
+    } finally { finish(); }
   }
   const submit = (e: FormEvent) => { e.preventDefault(); void send(input); };
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(input); } };
@@ -119,7 +154,7 @@ export function Chat() {
               <div className="mx-auto grid max-w-[820px] gap-6">
                 {msgs.map((m, i) => m.role === 'user'
                   ? <div key={i} className="max-w-[80%] justify-self-end rounded-[18px] rounded-br-[6px] bg-teal-tint px-4 py-2.5 text-[14px] whitespace-pre-wrap">{m.text}</div>
-                  : <AssistantTurn key={i} m={m} />)}
+                  : <AssistantTurn key={i} m={m} onDecide={i === msgs.length - 1 ? decide : undefined} />)}
                 <div ref={bottom} />
               </div>
             )}
@@ -163,15 +198,45 @@ export function Chat() {
   );
 }
 
-function AssistantTurn({ m }: { m: Extract<Msg, { role: 'assistant' }> }) {
+function AssistantTurn({ m, onDecide }: { m: Extract<Msg, { role: 'assistant' }>; onDecide?: (p: Proposal, d: 'confirm' | 'reject') => void }) {
+  // Tool calls before the proposal, the message that asks, the card, then the confirmed call.
+  const [before, after] = m.proposal ? [m.tools.filter(t => !t.id.startsWith('confirmed_')), m.tools.filter(t => t.id.startsWith('confirmed_'))] : [m.tools, []];
   return (
     <div className="grid gap-3">
-      {m.tools.length > 0 && <div className="grid gap-2">{m.tools.map(t => <ToolCard key={t.id} t={t} />)}</div>}
+      {before.length > 0 && <div className="grid gap-2">{before.map(t => <ToolCard key={t.id} t={t} />)}</div>}
       {m.text && <Markdown text={m.text} />}
+      {m.proposal && <ProposalCard p={m.proposal} onDecide={onDecide} />}
+      {after.length > 0 && <div className="grid gap-2">{after.map(t => <ToolCard key={t.id} t={t} />)}</div>}
       {!m.done && !m.text && (
         <span className="flex items-center gap-2 text-[13px] text-muted"><Loader2 size={14} className="animate-spin" />{m.tools.some(t => t.running) ? 'Calling tools…' : m.tools.length ? 'Writing the answer…' : 'Thinking…'}</span>
       )}
       {m.error && <ErrorNote>{m.error}</ErrorNote>}
+    </div>
+  );
+}
+
+function ProposalCard({ p, onDecide }: { p: Proposal; onDecide?: (p: Proposal, d: 'confirm' | 'reject') => void }) {
+  const waiting = p.state === 'waiting' && onDecide;
+  const label = { waiting: 'Waiting for you', running: 'Working…', confirmed: 'Confirmed', declined: 'Not run', expired: 'Expired' }[p.state];
+  return (
+    <div className="grid gap-2.5 rounded-[12px] border border-warn/40 bg-warn-tint/40 p-3.5">
+      <div className="flex items-center gap-2">
+        <ShieldQuestion size={15} className="text-warn" />
+        <span className="text-[13px] font-semibold">This changes data. Run it?</span>
+        <span className="ml-auto"><Pill kind={p.state === 'confirmed' ? 'ok' : p.state === 'waiting' || p.state === 'running' ? 'warn' : 'off'}>{label}</Pill></span>
+      </div>
+      <p className="text-[13.5px]">{p.summary}</p>
+      <details className="text-[12.5px]"><summary className="cursor-pointer text-muted">Exact call: <span className="font-mono">{p.name}</span></summary>
+        <pre className="mt-1.5 overflow-x-auto rounded-[8px] bg-sidebar p-2.5 font-mono text-[12px]">{JSON.stringify(p.args, null, 2)}</pre>
+      </details>
+      {waiting && (
+        <div className="flex gap-2">
+          <Button variant="primary" onClick={() => onDecide!(p, 'confirm')}>Confirm</Button>
+          <Button variant="outline" onClick={() => onDecide!(p, 'reject')}>Cancel</Button>
+        </div>
+      )}
+      {p.note && <p className="text-[12.5px] text-muted">{p.note}</p>}
+      {p.state === 'waiting' && !onDecide && <p className="text-[12.5px] text-muted">Only the latest request can be confirmed.</p>}
     </div>
   );
 }
@@ -188,7 +253,7 @@ function ToolCard({ t }: { t: ToolStep }) {
         {server && <span className="chip !py-0 !text-[11px]">{server}</span>}
         <span className="min-w-0 flex-1 truncate font-mono text-[12.5px]">{tool}</span>
         {t.running ? <Pill kind="warn"><Loader2 size={11} className="animate-spin" />running</Pill>
-          : t.outcome === 'ok' ? <Pill kind="ok">ok · {t.durationMs} ms</Pill>
+          : t.outcome === 'ok' ? <Pill kind="ok">{t.reused ? 'ok · reused' : `ok · ${t.durationMs} ms`}</Pill>
           : <Pill kind={t.outcome === 'tool_error' || t.outcome === 'timeout' ? 'warn' : 'bad'}>{(t.outcome ?? 'error').replace('_', ' ')}{t.durationMs !== undefined ? ` · ${t.durationMs} ms` : ''}</Pill>}
       </button>
       {open && (

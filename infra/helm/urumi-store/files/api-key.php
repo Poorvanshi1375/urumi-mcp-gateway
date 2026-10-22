@@ -1,14 +1,18 @@
 <?php
-// Create or update the read_write WooCommerce REST key for the MCP server.
+// Create or update the read_write WooCommerce REST key for the MCP server, owned by the
+// shop_manager service user (WOO_KEY_USER), never the administrator.
 // Woo stores the consumer key as wc_api_hash(ck) and the secret in plain text.
 global $wpdb;
 $table = $wpdb->prefix . 'woocommerce_api_keys';
 $ck = getenv('WOO_CONSUMER_KEY');
 $cs = getenv('WOO_CONSUMER_SECRET');
 $desc = getenv('WOO_KEY_DESCRIPTION');
-$user = get_user_by('login', getenv('WP_ADMIN_USER'));
+$user = get_user_by('login', getenv('WOO_KEY_USER'));
 if (!$ck || !$cs || !$user) {
-	WP_CLI::error('missing consumer key/secret or admin user');
+	WP_CLI::error('missing consumer key/secret or the MCP service user');
+}
+if (in_array('administrator', (array) $user->roles, true)) {
+	WP_CLI::error('the MCP service user must not be an administrator');
 }
 $data = array(
 	'user_id'         => $user->ID,

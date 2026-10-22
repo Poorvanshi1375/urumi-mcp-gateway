@@ -53,6 +53,28 @@ app: {{ .component }}
 {{- end }}
 
 {{/* Standard libpq env, read by node-postgres and psql alike. */}}
+{{- /* The gateway's own connection (idea AC): the restricted app role when postgres.appUser is set,
+otherwise the owner. Migrations always use pgEnv (the owner). */}}
+{{- define "urumi-platform.pgAppEnv" -}}
+{{- if .Values.postgres.appUser }}
+- name: PGHOST
+  value: {{ include "urumi-platform.postgresHost" . | quote }}
+- name: PGPORT
+  value: "5432"
+- name: PGDATABASE
+  value: {{ .Values.postgres.database | quote }}
+- name: PGUSER
+  value: {{ .Values.postgres.appUser | quote }}
+- name: PGPASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "urumi-platform.secretName" . }}
+      key: app-db-password
+{{- else }}
+{{- include "urumi-platform.pgEnv" . }}
+{{- end }}
+{{- end }}
+
 {{- define "urumi-platform.pgEnv" -}}
 - name: PGHOST
   value: {{ include "urumi-platform.postgresHost" . | quote }}

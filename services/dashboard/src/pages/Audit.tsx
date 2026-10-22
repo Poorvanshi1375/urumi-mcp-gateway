@@ -1,9 +1,9 @@
 import { Fragment, useState } from 'react';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { activityQuery, auditQuery, errorText, useMe, useOverview, useServers, useUsers, type ActivityEvent, type AuditFilter, type Outcome } from '../api';
-import { Button, OutcomePill, PageHeader, SummaryStrip, clock } from '../ui';
+import { Button, ButtonLink, OutcomePill, PageHeader, SummaryStrip, clock } from '../ui';
 
-const OUTCOMES: Outcome[] = ['ok', 'tool_error', 'timeout', 'upstream_unreachable', 'rejected', 'denied'];
+const OUTCOMES: Outcome[] = ['ok', 'tool_error', 'timeout', 'upstream_unreachable', 'rejected', 'denied', 'busy', 'pending', 'unknown'];
 const Select = ({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: [string, string][] }) => (
   <label className="flex items-center gap-2 rounded-full border border-line bg-surface py-1 pr-1 pl-3.5 text-[13px]">
     <span className="text-muted">{label}</span>
@@ -120,6 +120,9 @@ function ToolCalls() {
           options={[['', 'All'], ...(servers.data ?? []).map(s => [s.prefix, s.prefix] as [string, string])]} />
         <Select label="Outcome" value={f.outcome ?? ''} onChange={v => setF({ ...f, outcome: (v || undefined) as Outcome | undefined })}
           options={[['', 'All'], ...OUTCOMES.map(o => [o, o.replace('_', ' ')] as [string, string])]} />
+        {/* The same filters, as a spreadsheet-safe CSV (up to 10,000 rows). */}
+        <ButtonLink className="ml-auto self-end" download
+          href={`/api/audit/export.csv?${new URLSearchParams(Object.entries(f).filter(([, v]) => v) as [string, string][])}`}>Download CSV</ButtonLink>
       </div>
       <div className="card overflow-x-auto">
         <table className="w-full text-left text-[13px]">
@@ -142,7 +145,7 @@ function ToolCalls() {
                 {open === r.id && (
                   <tr className="bg-page/70"><td colSpan={7} className="px-4 pb-3 font-mono text-[12px] text-ink-2">
                     {r.error ? <>error: <span className={r.outcome === 'ok' ? '' : 'text-bad'}>{r.error}</span></> : 'no error'}
-                    {r.keyPrefix && <> · key {r.keyPrefix}…</>} · {new Date(r.at).toLocaleString()}
+                    {r.keyPrefix && (r.keyPrefix.startsWith('oauth:') ? <> · via {r.keyPrefix.slice(6)} (OAuth)</> : <> · key {r.keyPrefix}…</>)}{r.requestId && <> · request <span className="font-mono" title={r.requestId}>{r.requestId.slice(0, 8)}</span></>} · {new Date(r.at).toLocaleString()}
                   </td></tr>
                 )}
               </Fragment>

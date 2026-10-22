@@ -4,10 +4,10 @@
 {{- /* Upstreams registered on first start: our own servers (Woo first, G8), then extras. */}}
 {{- $boot := list }}
 {{- if .Values.wooMcp.enabled }}
-{{- $boot = append $boot (dict "prefix" "woo" "name" "WooCommerce" "url" (printf "http://%s-woo-mcp.%s.svc.cluster.local:8080/mcp" $name .Release.Namespace) "authType" "bearer" "credentialEnv" "WOO_MCP_TOKEN") }}
+{{- $boot = append $boot (dict "prefix" "woo" "name" "WooCommerce" "url" (printf "http://%s-woo-mcp.%s.svc.cluster.local:8080/mcp" $name .Release.Namespace) "authType" "bearer" "credentialEnv" "WOO_MCP_TOKEN" "releaseManaged" true) }}
 {{- end }}
 {{- if .Values.shipMcp.enabled }}
-{{- $boot = append $boot (dict "prefix" "ship" "name" "Shipping" "url" (printf "http://%s-ship-mcp.%s.svc.cluster.local:8080/mcp" $name .Release.Namespace) "authType" "bearer" "credentialEnv" "SHIP_MCP_TOKEN") }}
+{{- $boot = append $boot (dict "prefix" "ship" "name" "Shipping" "url" (printf "http://%s-ship-mcp.%s.svc.cluster.local:8080/mcp" $name .Release.Namespace) "authType" "bearer" "credentialEnv" "SHIP_MCP_TOKEN" "releaseManaged" true) }}
 {{- end }}
 {{- $boot = concat $boot $p.bootstrap.extraUpstreams }}
 {{- /* SSRF allowlist: our own in-cluster MCP servers by exact host name, plus platform.ssrf.allowHosts. */}}
@@ -15,6 +15,12 @@
 {{- if .Values.wooMcp.enabled }}{{- $allow = append $allow (printf "%s-woo-mcp.%s.svc.cluster.local" $name .Release.Namespace) }}{{- end }}
 {{- if .Values.shipMcp.enabled }}{{- $allow = append $allow (printf "%s-ship-mcp.%s.svc.cluster.local" $name .Release.Namespace) }}{{- end }}
 {{- $allow = concat $allow $p.ssrf.allowHosts }}
+{{- /* SSRF deny list: this platform's own names (dashboard, public URL, store), so the gateway can
+never be registered as its own upstream; plus platform.ssrf.denyHosts. Ports are stripped. */}}
+{{- $deny := list $p.ingress.host }}
+{{- with $p.publicUrl }}{{- $deny = append $deny (regexReplaceAll ":.*" (urlParse .).host "") }}{{- end }}
+{{- with .Values.wooMcp.store.signingBaseUrl }}{{- $deny = append $deny (regexReplaceAll ":.*" (urlParse .).host "") }}{{- end }}
+{{- $deny = concat $deny $p.ssrf.denyHosts | compact | uniq }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -40,6 +46,8 @@ spec:
         # app=platform is what the MCP upstreams' NetworkPolicies admit.
         {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "platform") | nindent 8 }}
     spec:
+      # The gateway never calls the Kubernetes API, so it holds no token (only the provisioner does).
+      automountServiceAccountToken: false
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
@@ -56,6 +64,19 @@ spec:
           command: ["node", "src/db/migrate.ts"]
           env:
             {{- include "urumi-platform.pgEnv" . | nindent 12 }}
+            {{- if .Values.postgres.appUser }}
+            # The role the app runs as, created and granted by the migration (idea AC).
+            - { name: APP_DB_USER, value: {{ .Values.postgres.appUser | quote }} }
+            - name: APP_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ include "urumi-platform.secretName" . }}, key: app-db-password } }
+            {{- if .Values.postgres.provisionerUser }}
+            # The provisioner's own role (T1-2/T1-3): its tables, and on upstreams only the rows it
+            # manages (row-level security). Optional key: an older Secret without it skips the role.
+            - { name: PROVISIONER_DB_USER, value: {{ .Values.postgres.provisionerUser | quote }} }
+            - name: PROVISIONER_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ include "urumi-platform.secretName" . }}, key: provisioner-db-password, optional: true } }
+            {{- end }}
+            {{- end }}
           resources:
             {{- toYaml .Values.migrate.resources | nindent 12 }}
           securityContext:
@@ -72,7 +93,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             - { name: PORT, value: "8080" }
-            {{- include "urumi-platform.pgEnv" . | nindent 12 }}
+            {{- include "urumi-platform.pgAppEnv" . | nindent 12 }}
             - name: PLATFORM_ENCRYPTION_KEY
               valueFrom: { secretKeyRef: { name: {{ $secret }}, key: encryption-key } }
             - { name: BOOTSTRAP_ADMIN_EMAIL, value: {{ $p.bootstrap.adminEmail | quote }} }
@@ -90,22 +111,48 @@ spec:
             - { name: UPSTREAM_HEALTH_INTERVAL_MS, value: {{ $p.upstreamHealthIntervalMs | quote }} }
             - { name: UPSTREAM_HEALTH_TIMEOUT_MS, value: {{ $p.upstreamHealthTimeoutMs | quote }} }
             - { name: UPSTREAM_CALL_TIMEOUT_MS, value: {{ $p.upstreamCallTimeoutMs | quote }} }
+            - { name: UPSTREAM_MAX_RESPONSE_BYTES, value: {{ $p.upstreamMaxResponseBytes | int | quote }} }
+            - { name: UPSTREAM_MAX_CONCURRENT_CALLS, value: {{ $p.upstreamBulkhead.maxConcurrentCalls | quote }} }
+            - { name: UPSTREAM_MAX_QUEUED_CALLS, value: {{ $p.upstreamBulkhead.maxQueuedCalls | quote }} }
+            - { name: UPSTREAM_QUEUE_WAIT_MS, value: {{ $p.upstreamBulkhead.queueWaitMs | quote }} }
             - { name: UPSTREAM_HEALTH_FAILURE_THRESHOLD, value: {{ $p.upstreamHealthFailureThreshold | quote }} }
             - name: GEMINI_API_KEY
               valueFrom: { secretKeyRef: { name: {{ $p.chat.secretName }}, key: {{ $p.chat.secretKey }}, optional: true } }
             - { name: CHAT_MODELS, value: {{ $p.chat.models | quote }} }
+            {{- if $p.chat.fallback.enabled }}
+            # OpenAI-compatible fallback (E): its key is optional in the same Secret; without it the
+            # fallback is simply not configured.
+            - name: LLM_FALLBACK_API_KEY
+              valueFrom: { secretKeyRef: { name: {{ $p.chat.secretName }}, key: {{ $p.chat.fallback.secretKey }}, optional: true } }
+            - { name: LLM_FALLBACK_BASE_URL, value: {{ $p.chat.fallback.baseUrl | quote }} }
+            - { name: LLM_FALLBACK_MODEL, value: {{ $p.chat.fallback.model | quote }} }
+            {{- end }}
             # Upstream URLs may not reach loopback, link-local/metadata or internal addresses,
             # except these hosts and CIDRs (checked at registration and on every connection).
             - { name: SSRF_ALLOW_HOSTS, value: {{ join "," $allow | quote }} }
             - { name: SSRF_ALLOW_CIDRS, value: {{ join "," $p.ssrf.allowCidrs | quote }} }
+            - { name: SSRF_DENY_HOSTS, value: {{ join "," $deny | quote }} }
+            - { name: SSRF_DENY_CIDRS, value: {{ join "," $p.ssrf.denyCidrs | quote }} }
             - { name: TOOL_PINNING, value: {{ ternary "on" "off" $p.features.toolPinning | quote }} }
             - { name: METRICS_PORT, value: {{ $p.metrics.port | quote }} }
             - { name: RATE_LIMIT_PER_MINUTE, value: {{ $p.rateLimit.perMinute | quote }} }
             - { name: RATE_LIMIT_BURST, value: {{ $p.rateLimit.burst | quote }} }
             - { name: CHAT_RATE_PER_MINUTE, value: {{ $p.rateLimit.chatPerMinute | quote }} }
             - { name: CHAT_RATE_BURST, value: {{ $p.rateLimit.chatBurst | quote }} }
+            - { name: MCP_AUTH_FAILURES_PER_MINUTE, value: {{ $p.rateLimit.authFailuresPerMinute | quote }} }
             - { name: TOOL_SEARCH, value: {{ ternary "on" "off" $p.features.toolSearch | quote }} }
+            - { name: OAUTH, value: {{ ternary "on" "off" $p.features.oauth | quote }} }
+            - { name: VALIDATE_ARGUMENTS, value: {{ ternary "on" "off" $p.features.validateArguments | quote }} }
+            # Hosted servers: the dashboard's API writes desired state; the provisioner runs it.
+            - { name: PROVISIONER, value: {{ ternary "on" "off" .Values.provisioner.enabled | quote }} }
+            - { name: HOSTED_ALLOWED_IMAGES, value: {{ join "," .Values.provisioner.hosted.allowedImages | quote }} }
+            - { name: HOSTED_MAX_SERVERS, value: {{ .Values.provisioner.hosted.maxServers | quote }} }
+            - { name: HOSTED_TIMEOUT_MINUTES, value: {{ .Values.provisioner.hosted.timeoutMinutes | quote }} }
+            - { name: MEMBER_DEFAULT, value: {{ $p.permissions.memberDefault | quote }} }
+            # The URL clients use: the OAuth issuer, and /mcp under it is the token audience.
+            - { name: PUBLIC_URL, value: {{ $p.publicUrl | default (printf "%s://%s" (ternary "https" "http" $p.ingress.tls.enabled) $p.ingress.host) | quote }} }
             - { name: CHAT_MAX_STEPS, value: {{ $p.chat.maxSteps | quote }} }
+            - { name: CHAT_CONFIRM_WRITES, value: {{ ternary "on" "off" $p.chat.confirmWrites | quote }} }
           ports:
             - name: http
               containerPort: 8080

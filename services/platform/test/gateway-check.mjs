@@ -51,7 +51,7 @@ let tools;
 await check('tools/list aggregates 3 upstreams (G2, G6)', async () => {
   tools = await names(alice);
   const by = p => tools.filter(t => t.startsWith(`${p}__`)).length;
-  must(by('woo') === 5 && by('ship') === 3 && by('deepwiki') >= 1, tools.join(','));
+  must(by('woo') === 6 && by('ship') === 3 && by('deepwiki') >= 1, tools.join(','));
   return `${tools.length} tools: woo ${by('woo')}, ship ${by('ship')}, deepwiki ${by('deepwiki')}`;
 });
 await check('colliding get_order exposed twice (G3)', async () => {
@@ -76,6 +76,15 @@ await check('deepwiki__read_wiki_structure', async () => {
 await check('unknown tool -> isError', async () => {
   const r = await alice.callTool({ name: 'nope__thing', arguments: {} });
   must(r.isError, 'expected isError'); return text(r);
+});
+await check('L: invalid arguments refused by the gateway, never sent', async () => {
+  const features = await fetch(`${GW_URL}/api/features`, { headers: { authorization: `Bearer ${KEY_ADMIN}` } }).then(r => r.json());
+  if (!features.validateArguments) return 'skipped: platform.features.validateArguments is off';
+  const r = await alice.callTool({ name: 'woo__get_order', arguments: { id: 'abc' } });
+  must(r.isError && /^Invalid arguments for "woo__get_order": .*arguments\/id must be integer/.test(text(r)), text(r));
+  const row = (await fetch(`${GW_URL}/api/audit?limit=5`, { headers: { authorization: `Bearer ${KEY_ADMIN}` } }).then(x => x.json())).events.find(e => e.tool === 'get_order');
+  must(row?.outcome === 'rejected' && row.durationMs < 1000, JSON.stringify(row));
+  return `${text(r).slice(0, 80)}; audited rejected in ${row.durationMs} ms`;
 });
 await check('upstream error passes through as tool_error', async () => {
   const r = await alice.callTool({ name: 'woo__get_order', arguments: { id: 999999 } });

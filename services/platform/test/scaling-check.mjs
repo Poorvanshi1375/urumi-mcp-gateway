@@ -55,20 +55,26 @@ await check('a disable made via one replica applies on all', async () => {
     return `12 lists over ${new Set(results.map(r => r.replica)).size} replicas, none with ship__ tools`;
   } finally { await api('PATCH', '/api/servers/ship', { enabled: true }); }
 });
-await check('rate limit per key: 429 with Retry-After', async () => {
+await check('rate limit per key is exact across replicas', async () => {
   const k = await api('POST', '/api/keys', { name: 'vdod-ratelimit' });
   try {
-    // Buckets are per replica (round-robin spreads one key over all of them), so send well over
-    // replicas x burst; the HPA may have added replicas under test load.
-    const burst = Number(process.env.RATE_BURST ?? 60), n = Math.max(300, pods().length * burst * 2);
+    // The bucket is shared by every replica (Postgres), so one key gets `burst` requests at once plus
+    // what refills while the test runs, however the requests are spread. Per-replica buckets would
+    // let through about replicas x burst.
+    const burst = Number(process.env.RATE_BURST ?? 60), perSec = Number(process.env.RATE_PER_MINUTE ?? 120) / 60, n = burst * 3;
     const res = [];
-    for (let sent = 0; sent < n; sent += 40) res.push(...await Promise.all(Array.from({ length: 40 }, () => list(k.key))));
-    const ok = res.filter(r => r.status === 200).length, limited = res.filter(r => r.status === 429);
-    must(limited.length > 0, `no 429 in ${res.length} requests`);
-    must(limited.every(r => Number(r.retryAfter) >= 1) && /rate limit/.test(limited[0].error), JSON.stringify(limited[0]));
+    const t0 = Date.now();
+    for (let sent = 0; sent < n; sent += 40) res.push(...await Promise.all(Array.from({ length: Math.min(40, n - sent) }, () => list(k.key))));
+    const elapsed = (Date.now() - t0) / 1000;
+    const ok = res.filter(r => r.status === 200), limited = res.filter(r => r.status === 429);
+    const most = burst + Math.ceil(elapsed * perSec) + 1;
+    const replicas = new Set(res.map(r => r.replica)).size;
+    must(replicas >= 2, `all requests went to ${replicas} replica`);
+    must(ok.length >= burst && ok.length <= most, `${ok.length} allowed; expected ${burst} to ${most} (burst ${burst} + ${elapsed.toFixed(1)} s of refill)`);
+    must(limited.length && limited.every(r => Number(r.retryAfter) >= 1) && /rate limit/.test(limited[0].error), JSON.stringify(limited[0]));
     const other = await list(KEY_MEMBER);
     must(other.status === 200, `another key was limited too: ${other.status}`);
-    return `${res.length} rapid requests over ${pods().length} replicas: ${ok} ok, ${limited.length} refused (retry-after ${limited[0].retryAfter} s); other keys unaffected`;
+    return `${res.length} requests over ${replicas} replicas in ${elapsed.toFixed(1)} s: ${ok.length} allowed (limit ${burst} + refill, at most ${most}), ${limited.length} refused with Retry-After; other keys unaffected`;
   } finally { await api('DELETE', `/api/keys/${k.id}`).catch(() => {}); }
 });
 await check('/metrics on every replica', async () => {

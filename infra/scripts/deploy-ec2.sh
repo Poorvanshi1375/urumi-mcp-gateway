@@ -23,8 +23,15 @@ read -r PT WT ST <<<"$TAGS"
 IMAGES=("urumi-platform:$PT" "urumi-woo-mcp:$WT" "urumi-ship-mcp:$ST")
 
 step "k3s $K3S_VERSION on $IP"
-"${SSH[@]}" "command -v k3s >/dev/null && sudo k3s --version | head -1 || (curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' sh -s - --write-kubeconfig-mode 644)"
+"${SSH[@]}" "command -v k3s >/dev/null && sudo k3s --version | head -1 || (curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' sh -s - --write-kubeconfig-mode 644 --secrets-encryption)"
 "${SSH[@]}" 'for i in $(seq 1 60); do sudo k3s kubectl get nodes 2>/dev/null | grep -q " Ready" && break; sleep 3; done; sudo k3s kubectl get nodes -o wide'
+
+step "Traefik on hostPort 80/443 (keeps each client's address; infra/k3s/traefik-hostport.yaml)"
+# Default k3s ServiceLB masquerades every client as 10.42.0.1 (measured on this VPS), which shares
+# the per-address sign-in and OAuth limits between all users. Applying it restarts Traefik once
+# (a few seconds without ingress); later runs change nothing.
+"${SSH[@]}" 'sudo k3s kubectl apply -f - >/dev/null' < infra/k3s/traefik-hostport.yaml
+"${SSH[@]}" 'for i in $(seq 1 60); do [ "$(sudo k3s kubectl -n kube-system get svc traefik -o jsonpath={.spec.type} 2>/dev/null)" = ClusterIP ] && break; sleep 3; done; sudo k3s kubectl rollout status -n kube-system deploy/traefik --timeout=300s'
 
 step "helm (copied from this machine: $(helm version --short))"
 "${SSH[@]}" 'command -v helm >/dev/null' || { scp -i "$KEY" "$(command -v helm)" "ubuntu@${IP}:/tmp/helm" && "${SSH[@]}" 'sudo install -m 755 /tmp/helm /usr/local/bin/helm && rm /tmp/helm'; }
@@ -45,11 +52,17 @@ step "secrets (scripts/secrets.sh on the node; values never leave a temp file)"
 scp -q -i "$KEY" scripts/secrets.sh "ubuntu@${IP}:urumi-helm/secrets.sh"
 GEM=""
 if kubectl get secret -n "$NS" platform-llm >/dev/null 2>&1; then
-  # The local Gemini key goes over SSH to a mode-600 file that is removed right after use.
-  kubectl get secret -n "$NS" platform-llm -o jsonpath='{.data.gemini-api-key}' | base64 -d | "${SSH[@]}" 'umask 077; cat > ~/urumi-helm/gemini.key'
-  GEM="--gemini-key-file ~/urumi-helm/gemini.key"
+  # The local LLM keys go over SSH to mode-600 files that are removed right after use. They replace
+  # the node's keys, so a key swapped locally (e.g. one with a used-up quota) is swapped there too.
+  for k in gemini-api-key fallback-api-key; do
+    v=$(kubectl get secret -n "$NS" platform-llm -o go-template="{{ index .data \"$k\" | base64decode }}" 2>/dev/null || true)
+    [ -n "$v" ] || continue
+    printf '%s' "$v" | "${SSH[@]}" "umask 077; cat > ~/urumi-helm/$k"
+    GEM="$GEM --${k%-api-key}-key-file ~/urumi-helm/$k"
+  done
+  unset v
 else echo "  no local platform-llm secret: chat will report 'not configured'"; fi
-"${SSH[@]}" "cd ~/urumi-helm && NS=$NS KUBECTL='sudo k3s kubectl' bash secrets.sh $GEM; rm -f ~/urumi-helm/gemini.key"
+"${SSH[@]}" "cd ~/urumi-helm && NS=$NS KUBECTL='sudo k3s kubectl' bash secrets.sh $GEM; rm -f ~/urumi-helm/gemini-api-key ~/urumi-helm/fallback-api-key"
 
 step "cert-manager $CERT_MANAGER_VERSION and the Let's Encrypt issuer (HTTP-01 through Traefik)"
 "${SSH[@]}" "export KUBECONFIG=/etc/rancher/k3s/k3s.yaml; \
@@ -80,7 +93,8 @@ step "store chart (store.host=$STORE_HOST)"
 step "platform chart (app host=$APP_HOST)"
 # The store's home URL is https, but woo-mcp calls WordPress over plain HTTP inside the cluster, so
 # WooCommerce verifies the OAuth signature over the http form of the URL (KT D.4).
-PSET="--set platform.ingress.host=$APP_HOST --set wooMcp.store.signingBaseUrl=http://$STORE_HOST --set image.tag=$PT --set wooMcp.image.tag=$WT --set shipMcp.image.tag=$ST"
+# denyCidrs: the node's own public address, refused as an upstream (the chart cannot know it).
+PSET="--set platform.ssrf.denyCidrs={$IP/32} --set platform.ingress.host=$APP_HOST --set wooMcp.store.signingBaseUrl=http://$STORE_HOST --set image.tag=$PT --set wooMcp.image.tag=$WT --set shipMcp.image.tag=$ST"
 "${SSH[@]}" "export KUBECONFIG=/etc/rancher/k3s/k3s.yaml; cd ~/urumi-helm && \
   helm lint urumi-platform -f urumi-platform/values-prod.yaml $PSET | tail -1 && \
   helm upgrade --install platform urumi-platform -n $NS -f urumi-platform/values-prod.yaml $PSET --wait --timeout 10m | grep -E 'STATUS|REVISION'"

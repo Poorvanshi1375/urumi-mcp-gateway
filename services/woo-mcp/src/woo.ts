@@ -18,9 +18,12 @@ export type WooConfig = {
 };
 
 export type WooApi = {
-  get(path: string, params?: Record<string, unknown>): Promise<{ status: number; data: any }>;
+  // The raw axios response: list endpoints also send X-WP-Total and X-WP-TotalPages.
+  get(path: string, params?: Record<string, unknown>): Promise<{ status: number; data: any; headers?: Record<string, unknown> }>;
   post(path: string, body: Record<string, unknown>): Promise<{ status: number; data: any }>;
   put(path: string, body: Record<string, unknown>): Promise<{ status: number; data: any }>;
+  // The public WordPress REST index (site name, timezone): not under wc/v3, so not signed.
+  siteIndex(): Promise<{ name?: string; home?: string; url?: string; timezone_string?: string; gmt_offset?: number | string }>;
 };
 
 export function createWooClient(cfg: WooConfig): WooApi {
@@ -47,15 +50,32 @@ export function createWooClient(cfg: WooConfig): WooApi {
   // (e.g. sku=undefined matches nothing), so optional params are dropped here.
   const defined = (params: Record<string, unknown> = {}) =>
     Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== null));
+  const site = new URL('wp-json/?_fields=name,timezone_string,gmt_offset', cfg.signingBaseUrl.replace(/\/?$/, '/'));
+  const siteIndex = () => new Promise<any>((resolve, reject) => {
+    const mod = site.protocol === 'https:' ? https : http;
+    const req = mod.get(site, { agent: new mod.Agent(agentOpts), timeout: cfg.timeoutMs }, res => {
+      let body = '';
+      res.setEncoding('utf8').on('data', c => { body += c; }).on('end', () => {
+        if (res.statusCode !== 200) return reject(Object.assign(new Error(`site index: HTTP ${res.statusCode}`), { code: 'ESITEINDEX' }));
+        try { resolve(JSON.parse(body)); } catch { reject(new Error('site index: not JSON')); }
+      });
+    });
+    req.on('timeout', () => req.destroy(Object.assign(new Error('timeout'), { code: 'ECONNABORTED' }))).on('error', reject);
+  });
   return {
     get: (path, params) => api.get(path, defined(params)),
     post: (path, body) => api.post(path, body),
     put: (path, body) => api.put(path, body),
+    siteIndex,
   };
 }
 
+// A failure the tool explains itself (e.g. a SKU conflict); its message is shown as it is.
+export class ToolError extends Error {}
+
 // Turn axios/Woo failures into one short, safe line (no credentials, no signed URLs).
 export function describeWooError(err: any): string {
+  if (err instanceof ToolError) return err.message;
   const r = err?.response;
   if (r) {
     const msg = r.data?.message ?? r.statusText ?? 'request failed';

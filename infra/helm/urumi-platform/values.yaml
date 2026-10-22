@@ -23,6 +23,14 @@ postgres:
     pullPolicy: IfNotPresent
   database: urumi
   user: urumi
+  # The role the gateway connects as (idea AC). It is created by the migration step and may add and
+  # complete audit rows but never delete or rewrite them; the owner (user) runs only the migrations.
+  # Its password is the platform Secret key app-db-password (scripts/secrets.sh). Empty: the app uses
+  # the owner, as before.
+  appUser: urumi_app
+  # The provisioner's role (hosted servers, stores): password key provisioner-db-password. Needs
+  # appUser. Empty: no provisioner role.
+  provisionerUser: urumi_provisioner
   runAsUser: 70                   # the postgres user of postgres:*-alpine images
   persistence:
     size: 2Gi
@@ -48,12 +56,15 @@ platform:
   # Prometheus metrics on a separate port (not routed by the Ingress; see networkPolicy.metricsScrapers).
   metrics:
     port: 9464
-  # Token bucket per API key on /mcp, and per user on the chat agent. Per replica. 0 = no limit.
+  # Token bucket per API key on /mcp, and per user on the chat agent, shared by all replicas (Postgres). 0 = no limit.
   rateLimit:
     perMinute: 120
     burst: 60
     chatPerMinute: 10
     chatBurst: 5
+    # Failed /mcp authentications per client address per minute (and burst), per replica; beyond it
+    # the address gets 429 before any key lookup. A load shield against floods of bad keys. 0 = off.
+    authFailuresPerMinute: 30
   ingress:
     enabled: true
     className: traefik
@@ -66,6 +77,15 @@ platform:
   upstreamHealthIntervalMs: 10000
   upstreamHealthTimeoutMs: 8000
   upstreamCallTimeoutMs: 20000
+  # Per upstream server: calls in flight at once, calls waiting for a slot, and how long one may
+  # wait. Beyond that a call is refused at once as "busy"; other servers are not affected.
+  # Largest answer read from an upstream, in bytes (10 MiB). Reading stops beyond it, before the
+  # answer is parsed, so one server cannot exhaust the gateway's memory.
+  upstreamMaxResponseBytes: 10485760
+  upstreamBulkhead:
+    maxConcurrentCalls: 8
+    maxQueuedCalls: 32
+    queueWaitMs: 2000
   upstreamHealthFailureThreshold: 2   # consecutive failed checks before Connected -> Unreachable
   # SSRF guard for admin-entered upstream URLs. Loopback, link-local (cloud metadata) and other
   # never-valid addresses are always refused. Internal addresses (private ranges, the cluster's
@@ -74,6 +94,11 @@ platform:
   ssrf:
     allowHosts: []
     allowCidrs: []
+    # Refused even if public or allowlisted. The platform's own hosts (ingress host, publicUrl, the
+    # store host) are added automatically; denyCidrs is for the node's public address, which the
+    # chart cannot know (infra/scripts/deploy-ec2.sh passes it). A malformed CIDR stops the start.
+    denyHosts: []
+    denyCidrs: []
   # Off by default so they cannot affect the core flow; turn on to show them.
   features:
     # Hash each upstream tool's definition; hide changed or new tools until an admin approves them.
@@ -81,6 +106,19 @@ platform:
     # Let clients connect to /mcp?mode=search and get two tools (search_tools, call_tool) instead
     # of the full list. Normal /mcp is unchanged.
     toolSearch: false
+    # OAuth on the gateway (MCP authorization spec): clients connect with only the URL and a browser
+    # sign-in, as an alternative to API keys. Needs publicUrl (derived from the ingress by default).
+    oauth: false
+    # Check each call's arguments against the tool's own input schema before forwarding, and hide
+    # tools whose schema is not valid JSON Schema. Off by default.
+    validateArguments: false
+  # Members and tools with no rule: allow (every tool) or readOnly (only tools the server marks
+  # readOnlyHint: true; a new server's write tools are then admin-only until allowed).
+  permissions:
+    memberDefault: allow
+  # How clients reach the gateway, e.g. https://app.example.com. Empty: http(s)://<ingress.host>
+  # (https when ingress.tls.enabled). Set it when a port is involved (k3d: http://localhost:9080).
+  publicUrl: ""
   bootstrap:
     # First start only: created if there are no users / no upstream with that prefix.
     adminEmail: admin@example.com
@@ -98,6 +136,19 @@ platform:
     secretKey: gemini-api-key
     models: "gemini-3.5-flash,gemini-3.5-flash-lite"   # tried in order; next one on overload/rate limit
     maxSteps: 8
+    # Ask the user before any chat tool call that may change data (any tool that is not read-only
+    # by a trusted server's hint, or that an admin set to "always"). The write is stored as a
+    # proposal and runs only when the user who asked confirms it.
+    confirmWrites: false
+    # A second LLM provider (OpenAI-compatible chat completions, e.g. Groq), tried after the Gemini
+    # models when they are overloaded, rate-limited, out of quota or too slow, and only before any
+    # tool has run in that answer. Its key is fallback-api-key in the same Secret
+    # (scripts/secrets.sh --fallback-key-file); without the key nothing changes.
+    fallback:
+      enabled: false
+      baseUrl: https://api.groq.com/openai/v1
+      model: openai/gpt-oss-120b
+      secretKey: fallback-api-key
   resources:
     requests:
       cpu: 50m
@@ -118,6 +169,38 @@ networkPolicy:
   # Who may scrape /metrics, e.g. [{ namespace: monitoring, podLabels: { app.kubernetes.io/name: prometheus } }].
   # Empty: nobody in the cluster (kubectl port-forward and exec still work).
   metricsScrapers: []
+  # The gateway's own egress (templates/networkpolicy.yaml). The SSRF guard checks every connection
+  # in code; this enforces the same rule in the network. Public ports: admin-registered MCP servers,
+  # DeepWiki and the LLM API.
+  gatewayEgress:
+    enabled: true
+    publicPorts: [ { port: 443, protocol: TCP }, { port: 80, protocol: TCP } ]
+    exceptCidrs: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8, 0.0.0.0/8, 224.0.0.0/4, 240.0.0.0/4]
+    # More egress rules (NetworkPolicy "to"/"ports" entries) for in-cluster servers an admin registers.
+    extra: []
+
+# The provisioner of hosted MCP servers and bonus stores (T1-2/T1-3), in progress. Off: nothing of
+# it is rendered. On: its Deployment (the only pod with a Kubernetes token), its ServiceAccount, two
+# ClusterRoles (namespaces it manages; the per-namespace tenant role it may bind), and admission
+# policies that fence it at the API server, plus the gateway's egress rule into tenant namespaces.
+# Needs Kubernetes 1.30+ (ValidatingAdmissionPolicy v1); an older API server refuses the install.
+provisioner:
+  enabled: false
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 384Mi }
+  # The Kubernetes API as the provisioner's pod reaches it: k3s serves it on the node, port 6443 (the
+  # kubernetes Service, 443, is translated there before NetworkPolicy applies). cidrs empty: the
+  # chart reads the API server's addresses from the cluster at install time.
+  apiServer:
+    ports: [6443]
+    cidrs: []
+  hosted:
+    # Image prefixes hosted servers may use, enforced by the API, the provisioner and the API server
+    # (an admission policy): <registry>/<path prefix>, matched on the normalised name.
+    allowedImages: ["docker.io/library/urumi-", "docker.io/mcp/"]
+    maxServers: 5
+    timeoutMinutes: 3        # a hosted server not ready by then is failed, with the pod's reason
 
 migrate:
   resources:
@@ -170,6 +253,8 @@ shipMcp:
   simulatedLatencyMs: 0
   # Test knob for tool pinning: appended to quote_shipping's description. Keep empty outside tests.
   testDescriptionSuffix: ""
+  # Test knob for tool pinning: JSON merged into quote_shipping's annotations. Keep empty outside tests.
+  testAnnotationsOverride: ""
   allowedClientApp: platform
   resources:
     requests:

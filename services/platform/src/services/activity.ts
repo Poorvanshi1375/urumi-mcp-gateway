@@ -11,7 +11,9 @@ export type Action =
   | 'invite_sent' | 'invite_revoked' | 'invite_accepted'
   | 'user_created' | 'role_changed' | 'user_disabled' | 'user_enabled' | 'user_renamed'
   | 'server_added' | 'server_edited' | 'server_enabled' | 'server_disabled' | 'server_removed'
-  | 'permission_changed' | 'tool_approved';
+  | 'permission_changed' | 'tool_approved'
+  | 'oauth_approved' | 'oauth_revoked'
+  | 'hosted_requested' | 'hosted_ready' | 'hosted_failed' | 'hosted_delete_requested' | 'hosted_removed';
 export type Actor = { id: string | null; email: string | null } | null;
 
 export async function recordActivity(db: Db, actor: Actor, action: Action, target: string | null, detail?: Record<string, unknown>, ip?: string) {

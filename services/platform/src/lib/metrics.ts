@@ -55,9 +55,10 @@ export const toolCalls = new Counter('mcp_tool_calls_total', 'Tool calls through
 export const toolCallSeconds = new Histogram('mcp_tool_call_duration_seconds', 'Tool call duration in seconds, by server and outcome.',
   [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30]);
 export const rejected = new Counter('mcp_rejected_requests_total', 'Requests to /mcp refused before reaching a tool, by reason.');
+export const auditUnavailable = new Counter('mcp_audit_unavailable_total', 'Tool calls refused because the audit row could not be written, by source.');
 
 // Gauges are read at scrape time from live state (upstream status), so they are never stale.
-export type UpstreamGauge = { prefix: string; status: string; tools: number; latencyMs: number | null };
+export type UpstreamGauge = { prefix: string; status: string; tools: number; latencyMs: number | null; inFlight?: number };
 
 export function renderMetrics(upstreams: UpstreamGauge[]): string {
   for (const [reason, n] of Object.entries(counters.rejectedUnauthenticated)) {
@@ -70,9 +71,11 @@ export function renderMetrics(upstreams: UpstreamGauge[]): string {
     toolCalls.render(),
     toolCallSeconds.render(),
     rejected.render(),
+    auditUnavailable.render(),
     gauge('mcp_upstream_up', '1 if the gateway can reach the upstream MCP server (connected), else 0.',
       upstreams.map(u => [{ server: u.prefix, status: u.status }, u.status === 'connected' ? 1 : 0])),
     gauge('mcp_upstream_tools', 'Tools the upstream currently exposes.', upstreams.map(u => [{ server: u.prefix }, u.tools])),
+    gauge('mcp_upstream_inflight_calls', 'Tool calls to the upstream in flight now (capped per server by the bulkhead).', upstreams.map(u => [{ server: u.prefix }, u.inFlight ?? 0])),
     gauge('mcp_upstream_health_latency_seconds', 'Duration of the last successful health check.',
       upstreams.filter(u => u.latencyMs !== null).map(u => [{ server: u.prefix }, u.latencyMs! / 1000])),
   ].join('\n\n') + '\n';

@@ -16,7 +16,13 @@ ENV NODE_ENV=production DASHBOARD_DIR=/app/public
 # DeepWiki (AWS us-west, ~280-400 ms TCP connect from India) then fail with ETIMEDOUT (V5).
 ENV NODE_OPTIONS=--network-family-autoselection-attempt-timeout=2000
 COPY platform/package.json platform/package-lock.json ./
-RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
+# The package managers are not needed once dependencies are installed (the containers only run
+# node), and they carry their own bundled packages that scanners flag (npm's undici and
+# brace-expansion in node:24-alpine). Removing them leaves a scan nothing of theirs to flag (the
+# image size is unchanged: they live in a base-image layer).
+RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force \
+ && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /opt/yarn-v* \
+      /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg
 COPY platform/drizzle ./drizzle
 COPY platform/src ./src
 COPY --from=dashboard /build/dist ./public

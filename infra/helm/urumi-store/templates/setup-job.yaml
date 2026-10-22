@@ -20,6 +20,8 @@ spec:
       annotations:
         checksum/setup: {{ include (print $.Template.BasePath "/setup-configmap.yaml") . | sha256sum }}
     spec:
+      # Nothing in this system calls the Kubernetes API, so no pod holds a token for it.
+      automountServiceAccountToken: false
       restartPolicy: Never
       # The WordPress PVC is ReadWriteOnce on node-local storage: run next to the WordPress pod.
       affinity:
@@ -53,6 +55,7 @@ spec:
             - { name: WP_ADMIN_EMAIL, value: {{ .Values.store.adminEmail | quote }} }
             - { name: WOO_VERSION, value: {{ .Values.woocommerce.version | quote }} }
             - { name: WOO_KEY_DESCRIPTION, value: {{ .Values.woocommerce.apiKeyDescription | quote }} }
+            - { name: WOO_KEY_USER, value: {{ .Values.woocommerce.apiKeyUser | quote }} }
             - name: WP_ADMIN_PASSWORD
               valueFrom:
                 secretKeyRef: { name: {{ $secret }}, key: wp-admin-password }

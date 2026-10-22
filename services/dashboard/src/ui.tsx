@@ -1,5 +1,5 @@
 // Small House-styled building blocks shared by every page.
-import { useState, type ButtonHTMLAttributes, type ReactNode } from 'react';
+import { useState, type AnchorHTMLAttributes, type ButtonHTMLAttributes, type ReactNode } from 'react';
 import { Check, Copy, X } from 'lucide-react';
 import type { Outcome, ServerStatus } from './api';
 
@@ -11,8 +11,13 @@ const variants: Record<Variant, string> = {
   danger: 'border border-bad text-bad hover:bg-bad-tint',
   ghost: 'text-ink-2 hover:bg-sidebar',
 };
+const buttonBase = 'inline-flex items-center justify-center gap-1.5 rounded-full px-4 py-2 text-[13px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50';
 export function Button({ variant = 'outline', className = '', ...rest }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant }) {
-  return <button {...rest} className={`inline-flex items-center justify-center gap-1.5 rounded-full px-4 py-2 text-[13px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${variants[variant]} ${className}`} />;
+  return <button {...rest} className={`${buttonBase} ${variants[variant]} ${className}`} />;
+}
+// A link styled as a button (downloads, navigation that must stay a real link).
+export function ButtonLink({ variant = 'outline', className = '', ...rest }: AnchorHTMLAttributes<HTMLAnchorElement> & { variant?: Variant }) {
+  return <a {...rest} className={`${buttonBase} ${variants[variant]} ${className}`} />;
 }
 
 const tone = {
@@ -34,6 +39,7 @@ const statusPill: Record<ServerStatus, [keyof typeof tone, string]> = {
 export const StatusPill = ({ status }: { status: ServerStatus }) => <Pill kind={statusPill[status][0]}>{statusPill[status][1]}</Pill>;
 const outcomePill: Record<Outcome, [keyof typeof tone, string]> = {
   ok: ['ok', 'ok'], tool_error: ['warn', 'tool error'], timeout: ['warn', 'timeout'], upstream_unreachable: ['bad', 'unreachable'], rejected: ['bad', 'rejected'], denied: ['bad', 'denied'],
+  busy: ['warn', 'busy'], pending: ['off', 'in progress'], unknown: ['bad', 'no result'],
 };
 export const OutcomePill = ({ outcome }: { outcome: Outcome }) => <Pill kind={outcomePill[outcome][0]}>{outcomePill[outcome][1]}</Pill>;
 
@@ -62,12 +68,25 @@ export function Toggle({ on, onChange, disabled, label }: { on: boolean; onChang
   );
 }
 
+// The clipboard API exists only in secure contexts (HTTPS or http://localhost). On any other plain
+// HTTP address it is missing, so fall back to the older copy command, and if that fails too, ask
+// for Ctrl+C (the text is select-all). A key shown once must never fail to copy silently.
+async function copyText(text: string): Promise<boolean> {
+  try { await navigator.clipboard.writeText(text); return true; } catch { /* not a secure context */ }
+  const area = document.createElement('textarea');
+  area.value = text; area.setAttribute('readonly', ''); area.style.position = 'fixed'; area.style.opacity = '0';
+  document.body.appendChild(area); area.select();
+  try { return document.execCommand('copy'); } catch { return false; } finally { area.remove(); }
+}
+
 export function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) {
-  const [done, setDone] = useState(false);
+  const [state, setState] = useState<'idle' | 'done' | 'manual'>('idle');
   return (
     <Button variant="outline" className="!px-3 !py-1" onClick={async () => {
-      try { await navigator.clipboard.writeText(text); setDone(true); setTimeout(() => setDone(false), 1500); } catch { /* selection fallback is the visible text */ }
-    }}>{done ? <Check size={14} /> : <Copy size={14} />}{done ? 'Copied' : label}</Button>
+      const ok = await copyText(text);
+      setState(ok ? 'done' : 'manual');
+      setTimeout(() => setState('idle'), ok ? 1500 : 4000);
+    }}>{state === 'done' ? <Check size={14} /> : <Copy size={14} />}{state === 'done' ? 'Copied' : state === 'manual' ? 'Select and press Ctrl+C' : label}</Button>
   );
 }
 

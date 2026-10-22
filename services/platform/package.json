@@ -29,6 +29,7 @@
     "@types/node": "24.19.1",
     "@types/pg": "8.23.1",
     "drizzle-kit": "0.31.11",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "yaml": "2.6.1"
   }
 }

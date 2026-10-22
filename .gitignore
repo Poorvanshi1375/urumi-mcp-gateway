@@ -6,6 +6,8 @@ node_modules/
 *.tgz
 dist/
 # local secret overrides for Helm, never commit
+# API key files (one key per file, read by scripts/secrets.sh), never commit
+.secrets/
 *.secret.yaml
 values-*.secret.yaml
 

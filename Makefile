@@ -1,9 +1,10 @@
 # Local workflow on k3d. The VPS uses the same charts with values-prod.yaml (infra/scripts/deploy-ec2.sh).
 #   make up         cluster + Secrets + images + both charts (safe to rerun)
 #   make verify     definition-of-done checks against the running cluster, plus secret scans
+#   make netpol-check  only the network isolation probes (run before recording a demo)
 #   make down       uninstall both releases; Secrets and volumes are kept, so `make up` brings the data back
 #   make destroy    delete the k3d cluster and everything in it
-# Options: GEMINI_KEY_FILE=<file> for `make secrets`; NS (default urumi).
+# Options: GEMINI_KEY_FILE=<file> and FALLBACK_KEY_FILE=<file> for `make secrets`; NS (default urumi).
 SHELL := bash
 .SHELLFLAGS := -euo pipefail -c
 .ONESHELL:
@@ -14,7 +15,7 @@ export CLUSTER NS
 STORE_VALUES := infra/helm/urumi-store/values-local.yaml
 PLATFORM_VALUES := infra/helm/urumi-platform/values-local.yaml
 
-.PHONY: up cluster secrets images install install-store install-platform verify verify-quick verify-all check-secrets hooks status down destroy
+.PHONY: up cluster secrets images install install-store install-platform verify verify-quick verify-all netpol-check check-secrets hooks status down destroy
 
 up: cluster secrets install
 
@@ -22,7 +23,7 @@ cluster:
 	scripts/cluster-up.sh
 
 secrets:
-	NS=$(NS) scripts/secrets.sh $(if $(GEMINI_KEY_FILE),--gemini-key-file $(GEMINI_KEY_FILE))
+	NS=$(NS) scripts/secrets.sh $(if $(GEMINI_KEY_FILE),--gemini-key-file $(GEMINI_KEY_FILE)) $(if $(FALLBACK_KEY_FILE),--fallback-key-file $(FALLBACK_KEY_FILE))
 
 # Builds the three images (tag = last commit of their sources) and imports them into the k3d nodes.
 images:
@@ -50,6 +51,10 @@ verify-quick:
 
 verify-all: check-secrets
 	scripts/verify-dod.sh --all
+
+# Only the NetworkPolicy probes (about 30 s). Run before recording a demo.
+netpol-check:
+	scripts/verify-dod.sh --netpol
 
 check-secrets:
 	scripts/check-secrets.sh --tree --live

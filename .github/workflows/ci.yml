@@ -1,0 +1,90 @@
+# Checks that need no cluster, on every push and pull request. The cluster checks
+# (scripts/verify-dod.sh) need a running store and are run by hand against k3d and the VPS.
+# No secrets are used here: none of these steps needs a credential.
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # check-secrets --history scans every commit
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.0
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.22.1
+
+      - name: Install dependencies
+        run: for s in platform woo-mcp ship-mcp evil-mcp dashboard; do (cd services/$s && npm ci --no-audit --no-fund); done
+
+      - name: Platform typecheck and unit checks
+        working-directory: services/platform
+        run: npx tsc --noEmit && node test/unit-check.mjs
+
+      - name: Dashboard typecheck and build
+        working-directory: services/dashboard
+        run: npm run build
+
+      # Node runs the MCP servers' TypeScript directly (type stripping): loading each module catches
+      # syntax Node cannot strip and broken imports.
+      - name: MCP servers load
+        run: |
+          (cd services/woo-mcp && node --input-type=module -e "await import('./src/tools.ts'); await import('./src/woo.ts')" && node test/unit.mjs)
+          (cd services/ship-mcp && node --input-type=module -e "await import('./src/tools.ts')")
+          (cd services/evil-mcp && node --input-type=module -e "await import('./src/tools.ts')")
+
+      - name: Helm lint (both charts, both values files)
+        run: |
+          IMG="--set image.tag=ci --set wooMcp.image.tag=ci --set shipMcp.image.tag=ci"
+          helm lint --strict infra/helm/urumi-store -f infra/helm/urumi-store/values-local.yaml
+          helm lint --strict infra/helm/urumi-store -f infra/helm/urumi-store/values-prod.yaml \
+            --set store.host=store.203.0.113.10.nip.io --set store.homeUrl=https://store.203.0.113.10.nip.io
+          helm lint --strict infra/helm/urumi-platform -f infra/helm/urumi-platform/values-local.yaml $IMG
+          helm lint --strict infra/helm/urumi-platform -f infra/helm/urumi-platform/values-prod.yaml $IMG \
+            --set platform.ingress.host=app.203.0.113.10.nip.io --set wooMcp.store.signingBaseUrl=http://store.203.0.113.10.nip.io
+
+      - name: Rendered-chart invariants
+        run: node scripts/chart-invariants.mjs && node scripts/chart-invariants.mjs --self-test
+
+      - name: Local versus production differences
+        run: node scripts/values-diff.mjs
+
+      - name: No committed secrets
+        run: scripts/check-secrets.sh --tree && scripts/check-secrets.sh --history
+
+  # Our three images, scanned with Trivy (pinned by digest: a tag can be moved). A fixable CRITICAL
+  # fails the job; HIGH is reported without failing, so a newly disclosed HIGH does not block an
+  # unrelated push. Third-party images and the charts are reported only: we pin their tags but
+  # cannot patch them. An entry in .trivyignore needs a reason and an expiry date. The charts are
+  # checked by scripts/chart-invariants.mjs in the job above (Trivy cannot render them: they need
+  # values such as secrets.existingSecret).
+  images:
+    needs: checks
+    runs-on: ubuntu-24.04
+    env:
+      TRIVY: docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy@sha256:26245f364b6f5d223003dc344ec1eb5eb8439052bfecb31d79aeba0c74344b3a
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the images (not pushed)
+        run: |
+          docker build -t urumi-platform:ci -f services/platform/Dockerfile services
+          docker build -t urumi-woo-mcp:ci -f services/woo-mcp/Dockerfile services/woo-mcp
+          docker build -t urumi-ship-mcp:ci -f services/ship-mcp/Dockerfile services/ship-mcp
+      - name: Our images (fail on fixable CRITICAL, report HIGH)
+        run: |
+          for i in platform woo-mcp ship-mcp; do
+            $TRIVY image --quiet --ignore-unfixed --severity HIGH urumi-$i:ci
+            $TRIVY image --quiet --ignore-unfixed --severity CRITICAL --exit-code 1 urumi-$i:ci
+          done
+      - name: Third-party images (report only)
+        run: |
+          for img in postgres:18-alpine mysql:8.4 wordpress:7.1.3-php8.3-apache wordpress:cli-2.12.0-php8.3; do
+            $TRIVY image --quiet --ignore-unfixed --severity CRITICAL,HIGH --exit-code 0 $img
+          done

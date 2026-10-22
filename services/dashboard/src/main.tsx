@@ -5,18 +5,21 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import './styles.css';
 import { RequireAdmin, Shell } from './Shell';
 import { AcceptInvite, Login } from './pages/Auth';
+import { Consent } from './pages/Consent';
 import { Servers } from './pages/Servers';
 import { Keys } from './pages/Keys';
 import { Audit } from './pages/Audit';
 import { Users } from './pages/Users';
 import { Connect } from './pages/Connect';
 import { Chat } from './pages/Chat';
+import { HostedServers } from './pages/Hosted';
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: true } } });
 
 const router = createBrowserRouter([
   { path: '/login', element: <Login /> },
   { path: '/invite/:token', element: <AcceptInvite /> },
+  { path: '/oauth/consent', element: <Consent /> },
   {
     element: <Shell />,
     children: [
@@ -27,6 +30,7 @@ const router = createBrowserRouter([
       { path: '/keys', element: <Keys /> },
       { path: '/connect', element: <Connect /> },
       { path: '/users', element: <RequireAdmin><Users /></RequireAdmin> },
+      { path: '/hosted', element: <RequireAdmin><HostedServers /></RequireAdmin> },
       { path: '*', element: <Navigate to="/chat" replace /> },
     ],
   },

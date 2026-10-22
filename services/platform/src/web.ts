@@ -5,7 +5,7 @@ import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
 
-const NOT_SPA = /^\/(api|mcp|healthz|readyz)(\/|$|\?)/;
+const NOT_SPA = /^\/(api|mcp|healthz|readyz|\.well-known)(\/|$|\?)/;
 
 export async function registerWeb(app: FastifyInstance, dir = process.env.DASHBOARD_DIR ?? path.resolve('public')) {
   // Baseline browser hardening for every response.

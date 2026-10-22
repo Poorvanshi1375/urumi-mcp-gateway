@@ -1,0 +1,29 @@
+# Keep each client's real address (idea Q). By default k3s exposes Traefik through ServiceLB
+# (klipper-lb), which masquerades every connection: Traefik, and so the gateway, sees 10.42.0.1 for
+# everyone, and per-address limits (sign-in lock, OAuth, the /mcp auth shield) are shared by all
+# users. Measured on our VPS before this change. externalTrafficPolicy: Local does not help, because
+# the ServiceLB pod masquerades anyway. Instead Traefik binds the node's ports 80 and 443 directly
+# (hostPort, no NAT to a shared address) and its Service becomes cluster-internal.
+# maxSurge 0: a new Traefik pod cannot bind the ports while the old one holds them, so an update
+# replaces it in place (a few seconds without ingress on a single node).
+# Applied by infra/scripts/deploy-ec2.sh (VPS) and scripts/cluster-up.sh (k3d); k3s's
+# helm-controller merges it into its bundled Traefik chart.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    service:
+      type: ClusterIP
+    ports:
+      web:
+        hostPort: 80
+      websecure:
+        hostPort: 443
+    updateStrategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 0
+        maxUnavailable: 1

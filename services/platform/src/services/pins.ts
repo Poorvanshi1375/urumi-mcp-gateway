@@ -5,18 +5,27 @@
 //     just added the server and can see its tools in the dashboard).
 //   - Afterwards, a tool whose definition hash differs from its pin, or a new tool, is "pending":
 //     hidden from tools/list, refused when called, shown with a diff until an admin approves it.
+// The pinned definition is everything that changes how a client or the model treats the tool:
+// title, description, input and output schemas, and annotations (a flipped readOnlyHint or
+// destructiveHint changes whether clients ask the user before calling it).
+// Pins made before annotations and outputSchema were included ("version 1", no `annotations` key in
+// the stored definition) are upgraded the next time they are checked, but only if the tool still
+// matches what was approved; a tool that changed stays pending. So an upgrade hides nothing.
 // Pins are cached in memory and reloaded on NOTIFY 'pins', so every replica agrees.
 import { createHash } from 'node:crypto';
-import { sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import type { Tool } from '@modelcontextprotocol/client';
 import type { Db } from '../db/client.ts';
 import { REGISTRY_CHANNEL } from '../db/client.ts';
 import { toolPins } from '../db/schema.ts';
 
-export type ToolDefinition = { title: string | null; description: string; inputSchema: unknown };
+export type ToolDefinition = { title: string | null; description: string; inputSchema: unknown; outputSchema?: unknown; annotations?: unknown };
 type Pin = { hash: string; definition: ToolDefinition };
 
-export const definitionOf = (t: Tool): ToolDefinition => ({ title: t.title ?? null, description: t.description ?? '', inputSchema: t.inputSchema ?? null });
+export const definitionOf = (t: Tool): ToolDefinition => ({ title: t.title ?? null, description: t.description ?? '', inputSchema: t.inputSchema ?? null,
+  outputSchema: t.outputSchema ?? null, annotations: t.annotations ?? null });
+const v1Of = (d: ToolDefinition) => ({ title: d.title ?? null, description: d.description ?? '', inputSchema: d.inputSchema ?? null });
+const isV1 = (d: ToolDefinition) => !d || !('annotations' in d);
 
 // Key order must not change the hash (Postgres jsonb also reorders keys).
 export function stable(v: unknown): string {
@@ -24,7 +33,9 @@ export function stable(v: unknown): string {
   if (v && typeof v === 'object') return `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${stable((v as any)[k])}`).join(',')}}`;
   return JSON.stringify(v);
 }
-export const toolHash = (t: Tool) => createHash('sha256').update(stable(definitionOf(t))).digest('hex');
+const sha = (v: unknown) => createHash('sha256').update(stable(v)).digest('hex');
+export const toolHash = (t: Tool) => sha(definitionOf(t));
+export const toolHashV1 = (t: Tool) => sha(v1Of(definitionOf(t)));
 
 export class Pinning {
   readonly enabled: boolean;
@@ -57,7 +68,23 @@ export class Pinning {
   pending(upstreamId: string, tools: Tool[]): Set<string> {
     if (!this.enabled) return new Set();
     const pins = this.pins.get(upstreamId) ?? new Map<string, Pin>();
-    return new Set(tools.filter(t => pins.get(t.name)?.hash !== toolHash(t)).map(t => t.name));
+    return new Set(tools.filter(t => {
+      const pin = pins.get(t.name);
+      if (!pin) return true;
+      if (pin.hash === toolHash(t)) return false;
+      if (isV1(pin.definition) && pin.hash === toolHashV1(t)) { this.upgrade(upstreamId, t, pin); return false; }
+      return true;
+    }).map(t => t.name));
+  }
+
+  // A version 1 pin that still matches: store the full definition, keeping who approved it and when.
+  // Every replica may do this once; the write is the same from each.
+  private upgrade(upstreamId: string, t: Tool, pin: Pin) {
+    const v1Hash = pin.hash;
+    Object.assign(pin, { hash: toolHash(t), definition: definitionOf(t) });   // in memory at once
+    void this.db.update(toolPins).set({ hash: pin.hash, definition: pin.definition })
+      .where(and(eq(toolPins.upstreamId, upstreamId), eq(toolPins.tool, t.name), eq(toolPins.hash, v1Hash)))
+      .catch(() => { Object.assign(pin, { hash: v1Hash, definition: v1Of(pin.definition) }); });   // retried on the next check
   }
 
   approved(upstreamId: string, tool: string): ToolDefinition | null {

@@ -30,8 +30,9 @@ if k3d cluster get "$CLUSTER" >/dev/null 2>&1; then
 else
   # Pull on the host first: pulls from inside the k3d nodes are unreliable on Docker Desktop.
   docker image inspect "$K3S_IMAGE" >/dev/null 2>&1 || docker pull "$K3S_IMAGE"
+  # --secrets-encryption: Secrets are encrypted at rest in the k3s datastore, as on the VPS.
   k3d cluster create "$CLUSTER" --image "$K3S_IMAGE" --servers 1 --agents "$AGENTS" --api-port "$API_PORT" \
-    -p "$HTTP_PORT:80@loadbalancer" -p "$HTTPS_PORT:443@loadbalancer" --wait
+    -p "$HTTP_PORT:80@loadbalancer" -p "$HTTPS_PORT:443@loadbalancer" --k3s-arg "--secrets-encryption@server:*" --wait
 fi
 kubectl config use-context "k3d-$CLUSTER" >/dev/null
 
@@ -39,6 +40,15 @@ echo "waiting for nodes and Traefik"
 kubectl wait --for=condition=Ready node --all --timeout=180s >/dev/null
 for i in $(seq 1 90); do kubectl get deploy -n kube-system traefik >/dev/null 2>&1 && break; sleep 2; done
 kubectl rollout status -n kube-system deploy/traefik --timeout=300s >/dev/null
+# Traefik on the node's ports instead of ServiceLB, as on the VPS (infra/k3s/traefik-hostport.yaml).
+# Locally k3d's own load balancer still sits in front, so the gateway sees its address, not yours;
+# what this keeps identical is the Traefik setup the VPS runs.
+if [ "$(kubectl -n kube-system get svc traefik -o jsonpath='{.spec.type}')" != ClusterIP ]; then
+  kubectl apply -f infra/k3s/traefik-hostport.yaml >/dev/null
+  for i in $(seq 1 60); do [ "$(kubectl -n kube-system get svc traefik -o jsonpath='{.spec.type}' 2>/dev/null)" = ClusterIP ] && break; sleep 3; done
+  kubectl rollout status -n kube-system deploy/traefik --timeout=300s >/dev/null
+  echo "Traefik switched to hostPort 80/443"
+fi
 kubectl get namespace "$NS" >/dev/null 2>&1 || kubectl create namespace "$NS" >/dev/null
 
 # Third-party images the charts and test pods use, pulled on the host and loaded into every node

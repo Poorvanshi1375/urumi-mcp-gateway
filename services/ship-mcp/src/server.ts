@@ -1,23 +1,27 @@
 // Shipping MCP server: Streamable HTTP at /mcp, same shape as woo-mcp (Fastify + MCP TS SDK v2).
 // Cluster-internal only; every MCP request must carry the bearer token that only the gateway holds.
 import { timingSafeEqual } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import Fastify from 'fastify';
 import { McpServer, createMcpHandler } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
-import { registerShipTools } from './tools.ts';
+import { digestRequest, registerShipTools, type RequestDigest } from './tools.ts';
 
 const bearerToken = process.env.MCP_BEARER_TOKEN;
 if (!bearerToken) throw new Error('missing required env MCP_BEARER_TOKEN');
 const port = Number(process.env.PORT ?? 8080);
 // Test knob for gateway timeout handling (G4): delay every tool call by this many ms.
 const latencyMs = Number(process.env.SIMULATED_LATENCY_MS ?? 0);
+// Test knob (AT): add the echo_request tool (hashes of each request's headers, URL and body).
+const echoRequest = process.env.ECHO_REQUEST_TOOL === '1';
+const requestContext = new AsyncLocalStorage<RequestDigest>();
 
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' }, disableRequestLogging: true });
-const log = (tool: string, ms: number, outcome: string, detail?: string) => app.log.info({ tool, ms, outcome, detail }, 'tool call');
+const log = (tool: string, ms: number, outcome: string, detail?: string, requestId?: string) => app.log.info({ tool, ms, outcome, detail, requestId }, 'tool call');
 
 const mcp = createMcpHandler(() => {
   const server = new McpServer({ name: 'urumi-ship-mcp', version: '0.1.0' });
-  registerShipTools(server, { latencyMs, log });
+  registerShipTools(server, { latencyMs, log, ...(echoRequest ? { echoRequest: () => requestContext.getStore() } : {}) });
   return server;
 });
 const mcpNode = toNodeHandler(mcp, { onerror: e => app.log.error(e, 'mcp adapter error') });
@@ -37,7 +41,8 @@ app.route({
       return reply.code(401).header('www-authenticate', 'Bearer').send({ error: 'unauthorized' });
     }
     reply.hijack();
-    await mcpNode(req.raw, reply.raw, req.body);
+    if (echoRequest) await requestContext.run(digestRequest(req.headers, req.raw.url ?? '', req.body), () => mcpNode(req.raw, reply.raw, req.body));
+    else await mcpNode(req.raw, reply.raw, req.body);
   },
 });
 
@@ -49,4 +54,4 @@ process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
 await app.listen({ port, host: '0.0.0.0' });
-app.log.info({ simulatedLatencyMs: latencyMs }, 'ship-mcp ready');
+app.log.info({ simulatedLatencyMs: latencyMs, echoRequestTool: echoRequest }, 'ship-mcp ready');

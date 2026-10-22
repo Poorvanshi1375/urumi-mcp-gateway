@@ -18,6 +18,8 @@ spec:
       labels:
         {{- include "urumi-store.componentLabels" (dict "ctx" . "component" "wordpress") | nindent 8 }}
     spec:
+      # Nothing in this system calls the Kubernetes API, so no pod holds a token for it.
+      automountServiceAccountToken: false
       # Apache runs as www-data (uid 33) instead of starting as root and dropping privileges.
       # Binding port 80 as non-root is allowed by this namespaced, "safe" sysctl, so no capability
       # is needed (all are dropped). The files on the volume already belong to 33.

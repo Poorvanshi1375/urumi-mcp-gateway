@@ -44,14 +44,39 @@ function parseTracking(t: string): number | null {
 const ok = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (text: string) => ({ content: [{ type: 'text' as const, text }], isError: true });
 
-export type ToolLogger = (tool: string, ms: number, outcome: 'ok' | 'error', detail?: string) => void;
+export type ToolLogger = (tool: string, ms: number, outcome: 'ok' | 'error', detail?: string, requestId?: string) => void;
+// The gateway's request id, from the W3C trace context it sends in _meta (traceparent), so one call
+// can be followed through the gateway's audit row and this server's log.
+export const requestIdOf = (ctx: any): string | undefined => /^00-([0-9a-f]{32})-/.exec(ctx?.mcpReq?._meta?.traceparent ?? '')?.[1];
 
-export function registerShipTools(server: McpServer, opts: { latencyMs: number; log: ToolLogger }) {
-  const run = (name: string, fn: (args: any) => unknown) => async (args: any) => {
+
+const annotationsOverride = (): Record<string, unknown> => {
+  try { return JSON.parse(process.env.TOOL_ANNOTATIONS_OVERRIDE || '{}'); } catch { return {}; }
+};
+
+// What one incoming HTTP request carried, as SHA-256 hashes only (AT): the header names, and a hash
+// of every token-like piece of every header value, of the URL and of the body. A test hashes the
+// credentials its client used and checks that none of them reached this server, without this server
+// ever returning a value.
+export type RequestDigest = { header_names: string[]; token_sha256: string[] };
+export function digestRequest(headers: Record<string, string | string[] | undefined>, url: string, body: unknown): RequestDigest {
+  const texts = [url, typeof body === 'string' ? body : JSON.stringify(body ?? null)];
+  for (const v of Object.values(headers)) if (v !== undefined) texts.push(...(Array.isArray(v) ? v : [v]));
+  const pieces = new Set<string>();
+  for (const t of texts) {
+    pieces.add(t);
+    for (const p of t.split(/[^A-Za-z0-9_\-.~+/]+/)) if (p.length >= 8) pieces.add(p);
+    // Query strings and cookies hold values after "=": "a=b" splits above into a and b already.
+  }
+  return { header_names: Object.keys(headers).sort(), token_sha256: [...pieces].map(p => createHash('sha256').update(p).digest('hex')).sort() };
+}
+
+export function registerShipTools(server: McpServer, opts: { latencyMs: number; log: ToolLogger; echoRequest?: () => RequestDigest | undefined }) {
+  const run = (name: string, fn: (args: any) => unknown) => async (args: any, ctx?: unknown) => {
     const t0 = Date.now();
     if (opts.latencyMs > 0) await new Promise(r => setTimeout(r, opts.latencyMs));
     const result: any = fn(args);
-    opts.log(name, Date.now() - t0, result?.isError ? 'error' : 'ok');
+    opts.log(name, Date.now() - t0, result?.isError ? 'error' : 'ok', undefined, requestIdOf(ctx));
     return result;
   };
 
@@ -66,14 +91,15 @@ export function registerShipTools(server: McpServer, opts: { latencyMs: number; 
 
   server.registerTool('quote_shipping', {
     title: 'Quote shipping',
-    // TOOL_DESCRIPTION_SUFFIX is a test knob (like SIMULATED_LATENCY_MS): it changes this tool's
-    // definition, the way a compromised upstream would, to exercise the gateway's tool pinning.
+    // TOOL_DESCRIPTION_SUFFIX and TOOL_ANNOTATIONS_OVERRIDE (JSON merged into the annotations) are
+    // test knobs (like SIMULATED_LATENCY_MS): they change this tool's definition, the way a
+    // compromised upstream would, to exercise the gateway's tool pinning.
     description: `Shipping options and prices (INR) to an Indian PIN code for a parcel weight.${process.env.TOOL_DESCRIPTION_SUFFIX ? ` ${process.env.TOOL_DESCRIPTION_SUFFIX}` : ''}`,
     inputSchema: z.object({
       pincode: z.string().regex(/^[1-9]\d{5}$/, 'a 6-digit Indian PIN code').describe('Destination PIN code'),
       weight_kg: z.number().positive().max(50),
     }),
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: true, ...annotationsOverride() },
   }, run('quote_shipping', a => {
     const zone = Number(a.pincode[0]) <= 5 ? 'south-west' : 'north-east';
     const slabs = Math.ceil(a.weight_kg / 0.5);
@@ -100,4 +126,15 @@ export function registerShipTools(server: McpServer, opts: { latencyMs: number; 
     if (id === null) return fail(`Unknown tracking number ${a.tracking_number}`);
     return ok(shipmentForOrder(id));
   }));
+
+  // Test knob (AT): ECHO_REQUEST_TOOL=1 adds a tool that returns the digest of the HTTP request that
+  // carried this very call. Off unless a check sets it.
+  if (opts.echoRequest) {
+    server.registerTool('echo_request', {
+      title: 'Echo request (test)',
+      description: 'Test tool: SHA-256 hashes of what the HTTP request carrying this call contained. Returns no values.',
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true },
+    }, run('echo_request', () => ok(opts.echoRequest!() ?? { error: 'no request context' })));
+  }
 }

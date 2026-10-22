@@ -28,8 +28,8 @@ const config = {
 
 const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' }, disableRequestLogging: true });
 const woo = createWooClient(config.woo);
-const logTool = (tool: string, ms: number, outcome: string, detail?: string) =>
-  app.log.info({ tool, ms, outcome, detail }, 'tool call');
+const logTool = (tool: string, ms: number, outcome: string, detail?: string, requestId?: string) =>
+  app.log.info({ tool, ms, outcome, detail, requestId }, 'tool call');
 
 const mcp = createMcpHandler(() => {
   const server = new McpServer({ name: 'urumi-woo-mcp', version: '0.1.0' });

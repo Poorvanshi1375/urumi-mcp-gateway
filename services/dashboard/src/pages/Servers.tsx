@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { ChevronDown, ChevronRight, KeyRound, MoreVertical, Plus, RefreshCw } from 'lucide-react';
-import { api, errorText, usableTools, useApiMutation, useMe, useOverview, useServers, type AuthType, type Server, type Tool } from '../api';
+import { api, errorText, usableTools, useApiMutation, useChatStatus, useFeatures, useMe, useOverview, useServers, type AuthType, type Server, type Tool } from '../api';
 import { Button, Drawer, ErrorNote, Field, PageHeader, Pill, StatusPill, SummaryStrip, Toggle, WarnNote, ago } from '../ui';
 
 export function Servers() {
@@ -8,6 +8,7 @@ export function Servers() {
   const overview = useOverview();
   const me = useMe();
   const isAdmin = me.data?.role === 'admin';
+  const features = useFeatures();
   const [editing, setEditing] = useState<Server | 'new' | null>(null);
   const list = servers.data ?? [];
   const connected = list.filter(s => s.status === 'connected').length;
@@ -31,6 +32,9 @@ export function Servers() {
         { label: 'Error rate · 24 h', value: c ? `${c.calls ? Math.round((c.errors / c.calls) * 100) : 0}%` : '—', hint: c ? `${c.errors} of ${c.calls} calls` : ' ', tone: c && c.calls && c.errors / c.calls > 0.2 ? 'warn' : undefined },
         { label: 'Latency p95', value: c ? `${c.p95_ms} ms` : '—', hint: c ? `avg ${c.avg_ms} ms` : ' ' },
       ]} />
+      {isAdmin && features.data?.memberDefault === 'readOnly' && (
+        <p className="text-[12.5px] text-muted">Members get a tool only if its server marks it read-only, unless you allow it below. New servers' write tools start admin-only.</p>
+      )}
       {servers.error && <ErrorNote>Couldn't load status: {errorText(servers.error)}</ErrorNote>}
 
       {servers.isPending ? <div className="card h-40 animate-pulse" /> : list.length === 0 ? (
@@ -48,11 +52,18 @@ export function Servers() {
   );
 }
 
-function ServerCard({ s, calls, isAdmin, onEdit }: { s: Server; calls?: { calls: number; errors: number }; isAdmin: boolean; onEdit: () => void }) {
+const duration = (from: string, to: string) => {
+  const s = Math.max(1, Math.round((new Date(to).getTime() - new Date(from).getTime()) / 1000));
+  return s < 120 ? `${s} s` : `${Math.round(s / 60)} min`;
+};
+function ServerCard({ s, calls, isAdmin, onEdit }: { s: Server; calls?: { calls: number; errors: number; p50_ms: number | null; p95_ms: number | null }; isAdmin: boolean; onEdit: () => void }) {
+  const pinningOn = useFeatures().data?.toolPinning === true;
   const [open, setOpen] = useState(false);
   const [menu, setMenu] = useState(false);
   const toggle = useApiMutation((enabled: boolean) => api('PATCH', `/api/servers/${s.prefix}`, { enabled }), [['servers']]);
   const permit = useApiMutation((p: { tool: string; memberAllowed: boolean }) => api('PUT', `/api/servers/${s.prefix}/permissions`, p), [['servers']]);
+  const confirmRule = useApiMutation((p: { tool: string; mode: 'auto' | 'always' | 'never' }) => api('PUT', `/api/servers/${s.prefix}/confirm`, p), [['servers']]);
+  const confirmOn = useChatStatus().data?.confirmWrites === true;
   const adminOnly = s.tools.filter(t => t.memberAllowed === false).length;
   const pendingCount = s.tools.filter(t => t.pending).length;
   const [reviewing, setReviewing] = useState<Tool | null>(null);
@@ -71,12 +82,15 @@ function ServerCard({ s, calls, isAdmin, onEdit }: { s: Server; calls?: { calls:
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-muted">
             {s.url && <span className="block max-w-full min-w-0 truncate font-mono" title={s.url}>{s.url}</span>}
+            {isAdmin && pinningOn && !s.pinned && <span title="Its tools change only with the platform's own release, so tool pinning does not apply">Deployed with the platform · not pinned</span>}
+            {s.managedBy && <span title={s.managedBy === 'hosted' ? 'Run by the platform from a container image; delete it on Hosted servers' : 'A bonus store\'s own server'}><Pill kind="off">{s.managedBy === 'hosted' ? 'Hosted' : 'Store'}</Pill></span>}
+            {isAdmin && !s.annotationsTrusted && <span title="The gateway ignores this server's read-only hints: members get its tools only by an explicit rule, and chat asks before running any of them">Read-only hints not trusted</span>}
             {isAdmin && <span className="flex items-center gap-1"><KeyRound size={13} />{s.authType === 'none' ? 'No auth' : `${s.authType === 'bearer' ? 'Bearer token' : `Header ${s.authHeaderName}`} · ${s.hasCredential ? 'set' : 'missing'}`}</span>}
           </div>
         </div>
         <div className="ml-auto flex flex-wrap items-center justify-end gap-x-3 gap-y-2">
           <span className="text-[12.5px] text-muted">
-            {s.tools.length} tools · {calls?.calls ?? 0} calls today{calls?.errors ? ` (${calls.errors} failed)` : ''}{s.status === 'connected' && s.latencyMs !== null ? ` · ${s.latencyMs} ms` : ''}{s.checkedAt ? ` · checked ${ago(s.checkedAt)}` : ''}
+            {s.tools.length} tools · {calls?.calls ?? 0} calls in 24 h{calls?.errors ? ` (${calls.errors} failed, ${Math.round((calls.errors / calls.calls) * 100)}%)` : ''}{calls?.p95_ms != null ? ` · p50 ${calls.p50_ms} ms, p95 ${calls.p95_ms} ms` : ''}{s.status === 'connected' && s.latencyMs !== null ? ` · ${s.latencyMs} ms` : ''}{s.checkedAt ? ` · checked ${ago(s.checkedAt)}` : ''}
           </span>
           {pendingCount > 0 && <Pill kind="warn">{pendingCount} tool{pendingCount === 1 ? '' : 's'} to review</Pill>}
           {s.status === 'connected' && s.error ? <Pill kind="warn">Degraded</Pill> : <StatusPill status={s.status} />}
@@ -96,6 +110,11 @@ function ServerCard({ s, calls, isAdmin, onEdit }: { s: Server; calls?: { calls:
       {s.status === 'unreachable' && s.error && (
         <div className="px-5 pb-4"><ErrorNote>{s.error}</ErrorNote></div>
       )}
+      {s.status === 'connected' && !s.error && s.lastOutage?.to && (
+        <p className="px-5 pb-4 text-[12.5px] text-muted">
+          Recovered {ago(s.lastOutage.to)} after {duration(s.lastOutage.from, s.lastOutage.to)} unreachable ({s.lastOutage.reason}){s.outages > 1 ? ` · ${s.outages} outages seen` : ''}
+        </p>
+      )}
       {s.status === 'connected' && s.error && (
         <div className="px-5 pb-4"><WarnNote>Last health check failed: <span className="font-mono text-[12.5px]">{s.error}</span>. Its tools stay available until it fails again.</WarnNote></div>
       )}
@@ -114,7 +133,20 @@ function ServerCard({ s, calls, isAdmin, onEdit }: { s: Server; calls?: { calls:
                 <span className="chip">{t.exposedAs ?? `${s.prefix}__${t.name}`}</span>
                 <span className="min-w-0 flex-1 text-[13.5px] text-ink-2">{t.description ?? ''}</span>
                 {t.pending && <Pill kind="warn">Changed · hidden</Pill>}
+                {t.invalid && <span title={t.invalid}><Pill kind="bad">Invalid schema · hidden</Pill></span>}
+                {(t.flags?.length ?? 0) > 0 && <span title={`Looks like instructions to an AI model: ${t.flags!.join(', ')}. Clients see it with a gateway notice.`}><Pill kind="bad">Instruction-like text</Pill></span>}
                 {t.pending && isAdmin && <Button variant="outline" className="!py-1" onClick={() => setReviewing(t)}>Review</Button>}
+                {isAdmin && confirmOn && (
+                  <label className="flex items-center gap-1.5 text-[12.5px] text-muted" title="Ask before running in chat. Automatic: ask unless the tool is read-only by the hint of a trusted server.">
+                    Ask in chat
+                    <select className="rounded-[8px] border border-line bg-page px-1.5 py-0.5 text-[12.5px] text-ink" value={t.chatConfirm ?? 'auto'} disabled={confirmRule.isPending}
+                      onChange={e => confirmRule.mutate({ tool: t.name, mode: e.target.value as 'auto' | 'always' | 'never' })}>
+                      <option value="auto">Automatic{(t.chatConfirm ?? 'auto') === 'auto' ? (t.asksInChat ? ': asks' : ': runs') : ''}</option>
+                      <option value="always">Always</option>
+                      <option value="never">Never</option>
+                    </select>
+                  </label>
+                )}
                 {isAdmin ? (
                   <span className="flex items-center gap-2 text-[12.5px] text-muted">
                     Members
@@ -159,7 +191,7 @@ function Versions({ label, before, after }: { label: string; before: unknown; af
 }
 function ReviewDrawer({ s, t, onClose }: { s: Server; t: Tool; onClose: () => void }) {
   const approve = useApiMutation(() => api('POST', `/api/servers/${s.prefix}/tools/${encodeURIComponent(t.name)}/approve`, {}), [['servers']]);
-  const now = { title: t.title ?? null, description: t.description ?? '', inputSchema: t.inputSchema ?? null };
+  const now = { title: t.title ?? null, description: t.description ?? '', inputSchema: t.inputSchema ?? null, outputSchema: t.outputSchema ?? null, annotations: t.annotations ?? null };
   return (
     <Drawer title={`Review ${t.exposedAs ?? t.name}`} onClose={onClose}
       footer={<>
@@ -170,13 +202,18 @@ function ReviewDrawer({ s, t, onClose }: { s: Server; t: Tool; onClose: () => vo
         {t.approved ? 'This tool changed since it was approved.' : 'This tool is new on a server whose tools were already approved.'} It is hidden from every client and from the chat agent until you approve it.
         Read the description as the model will: look for instructions to the model, links, or new fields that ask for data the tool should not need.
       </WarnNote>
+      {(t.flags?.length ?? 0) > 0 && <WarnNote>Flagged by the gateway as instructions to an AI model: {t.flags!.join(', ')}. Clients see this tool with a notice in front of its description.</WarnNote>}
       {t.approved ? <>
         <Versions label="Description" before={t.approved.description} after={now.description} />
         <Versions label="Title" before={t.approved.title ?? ''} after={now.title ?? ''} />
         <Versions label="Input schema" before={t.approved.inputSchema} after={now.inputSchema} />
+        {/* Pins made before annotations were pinned have no such field: nothing to compare. */}
+        {'annotations' in t.approved && <Versions label="Annotations" before={t.approved.annotations ?? null} after={now.annotations} />}
+        {'outputSchema' in t.approved && <Versions label="Output schema" before={t.approved.outputSchema ?? null} after={now.outputSchema} />}
       </> : <>
         <Versions label="Description" before="" after={now.description} />
         <Versions label="Input schema" before={null} after={now.inputSchema} />
+        {now.annotations != null && <Versions label="Annotations" before={null} after={now.annotations} />}
       </>}
       {approve.error && <ErrorNote>{errorText(approve.error)}</ErrorNote>}
     </Drawer>
@@ -193,10 +230,11 @@ function ServerDrawer({ server, onClose }: { server: Server | null; onClose: () 
   const [replacing, setReplacing] = useState(!server?.hasCredential);
   const [credential, setCredential] = useState('');
   const [enabled, setEnabled] = useState(server?.enabled ?? true);
+  const [trust, setTrust] = useState(server?.trustAnnotations ?? false);
   const [confirmRemove, setConfirmRemove] = useState(false);
 
   const save = useApiMutation(() => {
-    const body: Record<string, unknown> = { prefix, name, url, authType, enabled };
+    const body: Record<string, unknown> = { prefix, name, url, authType, enabled, trustAnnotations: trust };
     if (authType === 'header') body.authHeaderName = headerName;
     if (authType !== 'none' && replacing) body.credential = credential;   // write-only: only sent when replaced
     return server ? api('PATCH', `/api/servers/${server.prefix}`, body) : api('POST', '/api/servers', body);
@@ -243,6 +281,14 @@ function ServerDrawer({ server, onClose }: { server: Server | null; onClose: () 
         </Field>
       )}
       <div className="flex items-center justify-between"><span className="label">Enabled</span><Toggle on={enabled} onChange={setEnabled} label="Enabled" /></div>
+      <div className="grid gap-1">
+        <div className="flex items-center justify-between"><span className="label">Trust this server's read-only hints</span><Toggle on={trust} onChange={setTrust} label="Trust this server's read-only hints" /></div>
+        <p className="text-[12.5px] text-muted">
+          {editing && server!.annotationsTrusted && !server!.trustAnnotations
+            ? 'Deployed with the platform: its hints are trusted while it keeps the chart\'s prefix and URL.'
+            : 'Off: every tool counts as one that may change data. Members need an explicit rule to use it, and chat asks before running it. Turn on only for a server you trust not to mislabel its tools.'}
+        </p>
+      </div>
       {save.error && <ErrorNote>{errorText(save.error)}</ErrorNote>}
       {editing && (
         <div className="grid gap-2 border-t border-line pt-4">

@@ -31,6 +31,8 @@ spec:
       labels:
         {{- $labels | nindent 8 }}
     spec:
+      # Nothing in this system calls the Kubernetes API, so no pod holds a token for it.
+      automountServiceAccountToken: false
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true

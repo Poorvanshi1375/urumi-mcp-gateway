@@ -1,4 +1,4 @@
 {{- if .Values.shipMcp.enabled }}
-{{- $env := printf "- { name: SIMULATED_LATENCY_MS, value: %s }\n- { name: TOOL_DESCRIPTION_SUFFIX, value: %s }" (.Values.shipMcp.simulatedLatencyMs | quote) (.Values.shipMcp.testDescriptionSuffix | default "" | quote) }}
+{{- $env := printf "- { name: SIMULATED_LATENCY_MS, value: %s }\n- { name: TOOL_DESCRIPTION_SUFFIX, value: %s }\n- { name: TOOL_ANNOTATIONS_OVERRIDE, value: %s }" (.Values.shipMcp.simulatedLatencyMs | quote) (.Values.shipMcp.testDescriptionSuffix | default "" | quote) (.Values.shipMcp.testAnnotationsOverride | default "" | quote) }}
 {{- include "urumi-platform.mcpUpstream" (dict "ctx" . "component" "ship-mcp" "cfg" .Values.shipMcp "tokenKey" "ship-mcp-token" "extraEnv" $env) }}
 {{- end }}

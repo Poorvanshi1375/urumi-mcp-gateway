@@ -1,10 +1,12 @@
 import { useState, type FormEvent } from 'react';
 import { KeyRound, Plus } from 'lucide-react';
-import { api, errorText, useApiMutation, useKeys, useMe } from '../api';
+import { api, errorText, useApiMutation, useFeatures, useGrants, useKeys, useMe } from '../api';
 import { Button, CodeBox, ErrorNote, Field, Modal, PageHeader, Pill, WarnNote, ago } from '../ui';
 
 export const gatewayUrl = () => `${location.origin}/mcp`;
 export const claudeCommand = (key: string) => `claude mcp add --transport http urumi ${gatewayUrl()} --header "Authorization: Bearer ${key}"`;
+// With OAuth on, the URL alone is enough: the client opens the browser for sign-in and consent.
+export const claudeOAuthCommand = () => `claude mcp add --transport http urumi ${gatewayUrl()}`;
 
 export function Keys() {
   const me = useMe();
@@ -15,6 +17,7 @@ export function Keys() {
   const [created, setCreated] = useState<{ key: string; name: string } | null>(null);
   const [confirm, setConfirm] = useState<string | null>(null);
   const revoke = useApiMutation((id: string) => api('DELETE', `/api/keys/${id}`), [['keys']]);
+  const oauth = useFeatures().data?.oauth === true;
 
   return (
     <>
@@ -64,12 +67,17 @@ export function Keys() {
       </div>
       )}
       {revoke.error && <ErrorNote>{errorText(revoke.error)}</ErrorNote>}
+      {oauth && <ConnectedApps all={isAdmin && showAll} />}
       </section>
       <aside className="grid gap-4 xl:sticky xl:top-20">
         <section className="card grid gap-3 p-5">
           <h2 className="text-[15px] font-semibold">Connect in one line</h2>
           <p className="text-[13px] text-muted">Create a key, then add the gateway to Claude Code. Every enabled server's tools appear at once.</p>
           <CodeBox>{claudeCommand('<your key>')}</CodeBox>
+          {oauth && <>
+            <p className="text-[13px] text-muted">Or with no key at all: Claude Code opens your browser to sign in and approve, then appears under Connected apps.</p>
+            <CodeBox>{claudeOAuthCommand()}</CodeBox>
+          </>}
         </section>
         <section className="card grid gap-2 p-5 text-[13px] text-ink-2">
           <h2 className="text-[15px] font-semibold text-ink">Keep keys safe</h2>
@@ -109,3 +117,45 @@ function CreateKey({ onClose, onCreated }: { onClose: () => void; onCreated: (k:
     </Modal>
   );
 }
+
+// Apps connected with OAuth (a browser sign-in instead of a key). Disconnecting revokes the grant:
+// its tokens stop working on the next request.
+function ConnectedApps({ all }: { all: boolean }) {
+  const grants = useGrants(true, all);
+  const [confirm, setConfirm] = useState<string | null>(null);
+  const revoke = useApiMutation((id: string) => api('DELETE', `/api/oauth/grants/${id}`), [['grants']]);
+  return (
+    <section className="grid gap-2">
+      <h2 className="text-[15px] font-semibold">Connected apps</h2>
+      {grants.data?.length === 0 ? (
+        <p className="text-[13px] text-muted">No apps connected with a browser sign-in.</p>
+      ) : (
+        <div className="card overflow-x-auto">
+          <table className="w-full text-left text-[13.5px]">
+            <thead><tr className="eyebrow">{['App', ...(all ? ['Owner'] : []), 'Connected', 'Last used', ''].map(h => <th key={h} className="px-5 py-3 font-normal">{h}</th>)}</tr></thead>
+            <tbody>
+              {grants.data?.map(g => (
+                <tr key={g.id} className="border-t border-line">
+                  <td className="px-5 py-3 font-medium">{g.client}</td>
+                  {all && <td className="px-5 py-3 text-ink-2">{g.email}</td>}
+                  <td className="px-5 py-3 text-ink-2">{ago(g.createdAt)}</td>
+                  <td className="px-5 py-3 text-ink-2">{ago(g.lastUsedAt)}</td>
+                  <td className="px-5 py-3 text-right whitespace-nowrap">
+                    {confirm === g.id ? (
+                      <span className="inline-flex items-center gap-2">
+                        <Button variant="danger" className="!py-1" disabled={revoke.isPending} onClick={() => revoke.mutate(g.id, { onSuccess: () => setConfirm(null) })}>Disconnect</Button>
+                        <Button variant="ghost" className="!py-1" onClick={() => setConfirm(null)}>Cancel</Button>
+                      </span>
+                    ) : <Button variant="outline" className="!py-1" onClick={() => setConfirm(g.id)}>Disconnect</Button>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {revoke.error && <ErrorNote>{errorText(revoke.error)}</ErrorNote>}
+    </section>
+  );
+}
+

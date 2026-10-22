@@ -48,7 +48,6 @@ const names = async c => (await c.listTools(undefined, { cacheMode: 'bypass' }))
 const server = async prefix => (await api('GET', '/api/servers')).servers.find(s => s.prefix === prefix);
 
 const startedAt = new Date().toISOString();
-const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });   // store timezone
 
 console.log('--- D6 prerequisite: the gateway rejects requests without a valid key');
 await check('/mcp without a key -> 401', async () => {
@@ -113,11 +112,16 @@ await check('admin hides ship__quote_shipping from members -> gone, then restore
 
 console.log('--- D4/D5: the orders question, and one task that needs two servers');
 let latest;
-await check(`member: "orders today" (${today}) via woo__list_orders`, async () => {
-  const r = await member.callTool({ name: 'woo__list_orders', arguments: { created_on: today } });
+// "today" is resolved by woo-mcp in the store's own timezone, as for the chat agent.
+await check('member: "orders today" via woo__list_orders', async () => {
+  const r = await member.callTool({ name: 'woo__list_orders', arguments: { created_on: 'today' } });
   must(!r.isError, text(r).slice(0, 160));
   const j = JSON.parse(text(r));
-  return `${j.count} order(s) today${j.count ? ': ' + j.orders.map(o => `#${o.id} ${o.total} ${o.currency}`).join(', ') : ' (call succeeded; place an order to see one)'}`;
+  // The store computes the day's total exactly (idea A); check it against our own sum in cents.
+  const cents = j.orders.reduce((n, o) => n + BigInt(Math.round(Number(o.total) * 100)), 0n);
+  const stated = j.amount_total === null ? null : BigInt(j.amount_total.replace('.', '').padEnd(1, '0')) * (j.amount_total.includes('.') ? 10n ** BigInt(2 - j.amount_total.split('.')[1].length) : 100n);
+  must(j.complete === true && j.total_orders === j.count && (j.count === 0 || stated === cents), `amount_total ${j.amount_total} vs ${cents} cents; complete ${j.complete}; ${j.total_orders}/${j.count}`);
+  return `${j.count} order(s) on ${j.created_on} (the store's today), total ${j.amount_total} ${j.currency ?? ''}, complete${j.count ? ': ' + j.orders.map(o => `#${o.id} ${o.total} ${o.currency}`).join(', ') : ' (call succeeded; place an order to see one)'}`;
 });
 const anyOrder = JSON.parse(text(await member.callTool({ name: 'woo__list_orders', arguments: { per_page: 1 } }))).count > 0;
 if (!anyOrder) skip('member: latest order from woo, then its shipment from ship', 'the store has no orders yet (place one on the storefront)');
@@ -132,17 +136,43 @@ else await check('member: latest order from woo, then its shipment from ship', a
   return `woo #${latest.id} (${latest.status}) -> ship ${j.carrier} ${j.tracking_number} ${j.status}`;
 });
 
+// Idea A on real data: the busiest recent day (most orders among the last 100), so the store's
+// exact total is checked over several amounts, not an empty or one-order day.
+if (anyOrder) await check('A: the store\'s day total equals our own sum (busiest recent day)', async () => {
+  const recent = JSON.parse(text(await member.callTool({ name: 'woo__list_orders', arguments: { per_page: 100 } }))).orders;
+  const byDay = new Map();
+  for (const o of recent) { const d = o.date_created.slice(0, 10); byDay.set(d, (byDay.get(d) ?? 0) + 1); }
+  const [day] = [...byDay].sort((a, b) => b[1] - a[1])[0];
+  const j = JSON.parse(text(await member.callTool({ name: 'woo__list_orders', arguments: { created_on: day } })));
+  const cents = j.orders.reduce((n, o) => n + BigInt(Math.round(Number(o.total) * 100)), 0n);
+  const [i, f = ''] = j.amount_total.replace('-', '').split('.');
+  const stated = (j.amount_total.startsWith('-') ? -1n : 1n) * BigInt(i + f.padEnd(2, '0').slice(0, 2));
+  const statuses = Object.values(j.count_by_status).reduce((a, b) => a + b, 0);
+  must(j.count >= 1 && stated === cents && j.complete === true && j.total_orders === j.count && statuses === j.count,
+    `${day}: amount_total ${j.amount_total} vs ${cents} cents; complete ${j.complete}; total_orders ${j.total_orders}, count ${j.count}`);
+  return `${day}: ${j.count} orders, amount_total ${j.amount_total} ${j.currency} = our sum; ${JSON.stringify(j.count_by_status)}`;
+});
+
 console.log('--- D7: disabling a server removes its tools from the external client and the chat agent');
 await check('admin disables ship -> member list drops ship__ tools', async () => {
   const before = (await apiAs(KEY_MEMBER, 'GET', '/api/chat/status')).tools;
+  const shipTools = (await names(member)).filter(t => t.startsWith('ship__')).length;
   const t0 = Date.now();
   await api('PATCH', '/api/servers/ship', { enabled: false });
-  const gone = await waitFor(async () => !(await names(member)).some(t => t.startsWith('ship__')), 15000);
-  must(gone, 'ship tools still listed after 15 s');
+  // Requests are spread over the replicas; the one that did not handle the PATCH learns through
+  // NOTIFY (about a second). Wait until no replica's /mcp list and no replica's chat agent has a
+  // ship tool, by name. (Not "the count dropped by ship's tools": a third-party server such as
+  // DeepWiki can come back during the wait, as it did on 22 Oct, and refill the count.) Polls once a
+  // second so a slow wait cannot use up the key's rate limit.
+  let after, mcpCount;
+  const gone = await waitFor(async () => {
+    const lists = await Promise.all([1, 2, 3, 4].map(() => names(member)));
+    const chats = await Promise.all([1, 2, 3, 4].map(async () => (await apiAs(KEY_MEMBER, 'GET', '/api/chat/status')).toolNames ?? []));
+    after = chats.map(c => c.length).join('/'); mcpCount = lists.map(l => l.length).join('/');
+    return [...lists, ...chats].every(l => !l.some(t => t.startsWith('ship__')));
+  }, 15000, 1000);
   const ms = Date.now() - t0;
-  const after = (await apiAs(KEY_MEMBER, 'GET', '/api/chat/status')).tools;
-  const mcpCount = (await names(member)).length;
-  must(after === mcpCount && after < before, `chat sees ${after} tools (before ${before}), /mcp ${mcpCount}`);
+  must(shipTools > 0 && gone, `after 15 s: chat agents have ${after} tools (before ${before}, ship had ${shipTools}), /mcp ${mcpCount}; a ship__ tool is still listed`);
   return `gone from /mcp after ${ms} ms; chat agent tool count ${before} -> ${after}`;
 });
 await check('a direct call to the disabled server is rejected', async () => {
@@ -205,7 +235,11 @@ await check('start ship again -> Connected, tools return', async () => {
   must(s, `ship still ${(await server('ship')).status} after 120 s`);
   const back = await waitFor(async () => (await names(member)).some(t => t.startsWith('ship__')), 15000);
   must(back, 'connected, but tools not listed');
-  return `connected again after ${Date.now() - t0} ms`;
+  // The outage stays visible after recovery (the dashboard shows "recovered ... after ..."). Each
+  // replica keeps its own; wait until the one answering has recovered too.
+  const o = await waitFor(async () => { const x = await server('ship'); return x.status === 'connected' && x.lastOutage?.to && x.lastOutage; }, 30000, 500);
+  must(o?.to && o.reason && new Date(o.to) > new Date(o.from), `lastOutage: ${JSON.stringify(o)}`);
+  return `connected again after ${Date.now() - t0} ms; last outage kept: ${Math.round((new Date(o.to) - new Date(o.from)) / 1000)} s, "${o.reason.slice(0, 50)}"`;
 });
 
 console.log('--- D6: revoking a key rejects the next call');
@@ -250,6 +284,34 @@ await check('activity log has the admin actions above, by A', async () => {
   has('permission_changed', 'ship', 'permission change'); has('key_revoked', MEMBER_EMAIL, "revoke of B's key");
   must(!JSON.stringify(rows).includes(KEY_MEMBER), 'a full API key in the activity log');
   return rows.map(e => `${e.action}:${e.target}`).join(', ');
+});
+
+await check('one request id: client response, audit row, woo-mcp log', async () => {
+  let rid = null;
+  const c = new Client({ name: 'dod-trace', version: '0' });
+  await c.connect(new StreamableHTTPClientTransport(new URL(`${GW_URL}/mcp`), { requestInit: { headers: { authorization: `Bearer ${KEY_ADMIN}` } },
+    fetch: (u, i) => fetch(u, i).then(r => { if (i?.body?.includes?.('tools/call')) rid = r.headers.get('x-request-id'); return r; }) }));
+  const r = await c.callTool({ name: 'woo__list_orders', arguments: { per_page: 1 } });
+  await c.close();
+  must(!r.isError && /^[0-9a-f]{32}$/.test(rid ?? ''), `request id ${rid}`);
+  const rows = (await api('GET', `/api/audit?requestId=${rid}`)).events;
+  must(rows.length === 1 && rows[0].tool === 'list_orders' && rows[0].outcome === 'ok', JSON.stringify(rows));
+  const logged = await waitFor(async () => execSync(`kubectl logs -n ${NS} deploy/platform-woo-mcp --since=5m`, { encoding: 'utf8' }).includes(rid), 10000, 1000);
+  must(logged, `request ${rid} not in the woo-mcp log`);
+  return `x-request-id ${rid.slice(0, 12)}…: one audit row (woo/list_orders ok) and the woo-mcp log line`;
+});
+
+await check('every audit row of this run is complete (write-ahead audit)', async () => {
+  const rows = (await api('GET', '/api/audit?limit=200')).events.filter(e => e.at >= startedAt);
+  const open = rows.filter(r => r.outcome === 'pending' || r.outcome === 'unknown');
+  must(rows.length && !open.length, `${open.length} of ${rows.length} rows not completed: ${JSON.stringify(open.slice(0, 2))}`);
+  return `${rows.length} rows since the start, none pending or unknown`;
+});
+await check('overview: calls, error rate and latency per server', async () => {
+  const o = await api('GET', '/api/overview');
+  const woo = o.perServer.find(x => x.server === 'woo');
+  must(woo && woo.calls > 0 && Number.isInteger(woo.p50_ms) && Number.isInteger(woo.p95_ms) && woo.p95_ms >= woo.p50_ms, JSON.stringify(o.perServer));
+  return o.perServer.map(x => `${x.server}: ${x.calls} calls, ${x.errors} failed, p50 ${x.p50_ms ?? '-'} / p95 ${x.p95_ms ?? '-'} ms`).join('; ');
 });
 
 console.log(failed ? `DOD CHECK FAILED (${failed})` : 'DOD CHECK PASSED');

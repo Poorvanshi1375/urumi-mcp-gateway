@@ -17,6 +17,8 @@ spec:
       labels:
         {{- include "urumi-store.componentLabels" (dict "ctx" . "component" "mysql") | nindent 8 }}
     spec:
+      # Nothing in this system calls the Kubernetes API, so no pod holds a token for it.
+      automountServiceAccountToken: false
       # Runs as the image's mysql user (uid 999), never as root; the entrypoint then skips gosu
       # and its chown step. Data created by this chart already belongs to 999.
       securityContext:

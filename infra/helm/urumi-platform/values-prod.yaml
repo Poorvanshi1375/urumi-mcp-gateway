@@ -12,6 +12,18 @@ platform:
       enabled: true
       redirectHttp: true
   upstreamHealthIntervalMs: 10000
+  # Stand-outs 3, 4 and 6 are on in the shipped values (the chart default is off).
+  features:
+    toolPinning: true
+    toolSearch: true
+    oauth: true
+    validateArguments: true
+  chat:
+    confirmWrites: true   # chat asks before any write
+    fallback:
+      enabled: true       # Groq when Gemini fails (needs fallback-api-key in platform-llm)
+  permissions:
+    memberDefault: readOnly   # safe default for servers added later; explicit rules still win
   autoscaling:
     enabled: true          # HPA on CPU, 2 to 4 gateway replicas (k3s ships metrics-server)
 
@@ -25,3 +37,8 @@ wooMcp:
 # Created by scripts/secrets.sh, never by the chart.
 secrets:
   existingSecret: platform-secrets
+
+# The provisioner (hosted servers, bonus stores): the only pod with a Kubernetes token, fenced by
+# RBAC and admission policies. Idle until its steps land (P5, P9).
+provisioner:
+  enabled: true

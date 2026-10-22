@@ -1,0 +1,1 @@
+ALTER TABLE "upstreams" ADD COLUMN "trust_annotations" boolean DEFAULT false NOT NULL;

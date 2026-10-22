@@ -16,6 +16,8 @@ spec:
       labels:
         {{- include "urumi-platform.componentLabels" (dict "ctx" . "component" "postgres") | nindent 8 }}
     spec:
+      # Nothing in this system calls the Kubernetes API, so no pod holds a token for it.
+      automountServiceAccountToken: false
       # Runs as the image's own postgres user (uid 70 in the alpine image), never as root. The
       # entrypoint then skips its chown step, so the data directory must already belong to that
       # user: true for data created by this chart; on a fresh volume initdb creates it as 70.
