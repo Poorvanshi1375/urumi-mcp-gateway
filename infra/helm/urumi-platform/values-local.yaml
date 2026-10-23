@@ -33,3 +33,7 @@ secrets:
 # RBAC and admission policies. Idle until its steps land (P5, P9).
 provisioner:
   enabled: true
+  stores:
+    homeUrlTemplate: "http://{host}:9080"      # k3d publishes Traefik on 9080
+    signingUrlTemplate: "http://{host}:9080"
+    values: { wordpress: { service: { extraPorts: [9080] } } }

@@ -1,0 +1,114 @@
+{{- /*
+The store's own MCP server (multi-store bonus): our woo-mcp, inside this store's namespace, when the
+provisioner creates a bonus store (mcp.enabled; off for the default store, whose woo-mcp is in the
+platform release). The Service is named "mcp" and the pod carries urumi.dev/role=mcp: the one host
+the gateway's SSRF guard allows for a store's server, and the only pod its NetworkPolicy reaches in
+a tenant namespace. It talks to WordPress inside the namespace (no hairpin through the Ingress) and
+accepts only the gateway's pods.
+*/}}
+{{- if .Values.mcp.enabled }}
+{{- $m := .Values.mcp }}
+{{- $name := printf "%s-mcp" (include "urumi-store.fullname" .) }}
+{{- $labels := include "urumi-store.componentLabels" (dict "ctx" . "component" "mcp") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "urumi-store.componentSelector" (dict "ctx" . "component" "mcp") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- $labels | nindent 8 }}
+        urumi.dev/role: mcp
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: mcp
+          image: "{{ $m.image.repository }}:{{ required "mcp.image.tag is required when mcp.enabled" $m.image.tag }}"
+          imagePullPolicy: {{ $m.image.pullPolicy }}
+          env:
+            - { name: PORT, value: "8080" }
+            # Signed over the store's public URL, sent to WordPress inside the namespace.
+            # WooCommerce checks the signature against the URL it receives: in-cluster that is http, so
+            # signingBaseUrl differs from an https home URL (default: the home URL).
+            - { name: WC_SIGNING_BASE_URL, value: {{ default (include "urumi-store.homeUrl" .) $m.signingBaseUrl | quote }} }
+            - { name: WC_CONNECT_HOST, value: {{ printf "%s-wordpress.%s.svc.cluster.local" (include "urumi-store.fullname" .) .Release.Namespace | quote }} }
+            - { name: WC_TIMEOUT_MS, value: "15000" }
+            - name: WC_CONSUMER_KEY
+              valueFrom: { secretKeyRef: { name: {{ include "urumi-store.secretName" . }}, key: woo-consumer-key } }
+            - name: WC_CONSUMER_SECRET
+              valueFrom: { secretKeyRef: { name: {{ include "urumi-store.secretName" . }}, key: woo-consumer-secret } }
+            - name: MCP_BEARER_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ include "urumi-store.secretName" . }}, key: {{ $m.tokenKey }} } }
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml $m.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "urumi-store.componentSelector" (dict "ctx" . "component" "mcp") | nindent 4 }}
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+---
+# Only the gateway's pods may connect; it may reach only DNS and this store's WordPress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "urumi-store.componentSelector" (dict "ctx" . "component" "mcp") | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ $m.gateway.namespace }} } }
+          podSelector: { matchLabels: {{ $m.gateway.podLabels | toJson }} }
+      ports: [ { port: 8080, protocol: TCP } ]
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ .Values.networkPolicy.dns.namespace }} } }
+          podSelector: { matchLabels: {{ .Values.networkPolicy.dns.podLabels | toJson }} }
+      ports: [ { port: 53, protocol: UDP }, { port: 53, protocol: TCP } ]
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "urumi-store.componentSelector" (dict "ctx" . "component" "wordpress") | nindent 14 }}
+      ports: [ { port: 80, protocol: TCP } ]
+{{- end }}

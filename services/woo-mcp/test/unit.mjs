@@ -1,5 +1,6 @@
 // Unit checks for woo-mcp that need no store: exact money sums and the list_orders summary.
 // Run: node test/unit.mjs   (from services/woo-mcp; CI runs it too)
+import { SITE_FIELDS } from '../src/woo.ts';
 import { ordersForTotals, registerWooTools, storeDay, sumAmounts, summarizeOrders, TOTALS_CAP } from '../src/tools.ts';
 
 let failed = 0;
@@ -64,7 +65,8 @@ for (const [n, want, capped] of [[250, '312.50', false], [1200, '1250.00', true]
   const fakeServer = { registerTool: (name, _cfg, h) => { handlers[name] = h; } };
   let siteReads = 0;
   const woo = {
-    siteIndex: async () => { siteReads++; return { name: 'NYC Store', home: 'https://nyc.store.example', timezone_string: 'America/New_York', gmt_offset: -4 }; },
+    // Like WordPress with ?_fields: only the fields woo-mcp asks for come back.
+    siteIndex: async () => { siteReads++; const full = { name: 'NYC Store', url: 'https://nyc.store.example', home: 'https://nyc.store.example', timezone_string: 'America/New_York', gmt_offset: -4, routes: {} }; return Object.fromEntries(SITE_FIELDS.split(',').map(k => [k, full[k]])); },
     get: async path => ({
       'data/currencies/current': { data: { code: 'USD', symbol: '&#36;' } },
       products: { data: [{ id: 1, name: 'Mug', sku: 'M', status: 'publish', price: '5', regular_price: '5', stock_status: 'instock' }] },

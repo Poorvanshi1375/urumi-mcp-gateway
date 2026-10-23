@@ -173,7 +173,7 @@ app.route({
 });
 
 registerOAuth(app, db, oauthConfig);
-registerApi(app, { db, cipher, manager, core, perms, ssrf, pinning, features: config.features, hosted: config.hosted, oauth: oauthConfig, chat: config.chat,
+registerApi(app, { db, cipher, manager, core, perms, ssrf, pinning, features: config.features, hosted: config.hosted, stores: config.stores, oauth: oauthConfig, chat: config.chat,
   chatLimiter: new SharedRateLimiter(db, config.chatRateLimit.perMinute, config.chatRateLimit.burst, limiterError) });
 
 // Prometheus metrics on their own port: not behind the Ingress, and closed by NetworkPolicy except

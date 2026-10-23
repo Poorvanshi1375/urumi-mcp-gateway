@@ -37,6 +37,12 @@ spec:
           podSelector:
             matchLabels:
               {{- toYaml $np.ingressController.podLabels | nindent 14 }}
+        {{- if .Values.mcp.enabled }}
+        # This store's own MCP server (mcp.yaml), in the same namespace.
+        - podSelector:
+            matchLabels:
+              {{- include "urumi-store.componentSelector" (dict "ctx" . "component" "mcp") | nindent 14 }}
+        {{- end }}
         {{- range $np.storeApiClients }}
         - namespaceSelector:
             matchLabels: { kubernetes.io/metadata.name: {{ .namespace | default $.Release.Namespace }} }

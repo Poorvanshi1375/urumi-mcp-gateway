@@ -39,9 +39,14 @@ install-platform:
 	PT=$$(infra/scripts/build-image.sh platform | tail -1)
 	WT=$$(infra/scripts/build-image.sh woo-mcp | tail -1)
 	ST=$$(infra/scripts/build-image.sh ship-mcp | tail -1)
-	echo "images: platform $$PT, woo-mcp $$WT, ship-mcp $$ST"
+	PV=$$(infra/scripts/build-image.sh provisioner | tail -1)
+	WZ=$$(infra/scripts/build-image.sh woocommerce-zip | tail -1)
+	BR=$$(infra/scripts/build-image.sh mcp-bridge | tail -1)
+	echo "images: platform $$PT, woo-mcp $$WT, ship-mcp $$ST, provisioner $$PV, woocommerce-zip $$WZ"
 	helm upgrade --install platform infra/helm/urumi-platform -n $(NS) -f $(PLATFORM_VALUES) \
-	  --set image.tag=$$PT --set wooMcp.image.tag=$$WT --set shipMcp.image.tag=$$ST --wait --timeout 10m
+	  --set image.tag=$$PT --set wooMcp.image.tag=$$WT --set shipMcp.image.tag=$$ST \
+	  --set provisioner.image.tag=$$PV --set provisioner.stores.pluginImage=urumi-woocommerce-zip:$$WZ \
+	  --set provisioner.hosted.bridgeImage=urumi-mcp-bridge:$$BR --wait --timeout 10m
 
 verify: check-secrets
 	scripts/verify-dod.sh

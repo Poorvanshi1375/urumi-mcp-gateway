@@ -11,7 +11,7 @@ import { hostedSteps } from '../src/provision/hosted.ts';
 import { podSecurityProblems } from '../../../scripts/lib/pod-security.mjs';
 import { asksInChat, Permissions } from '../src/services/permissions.ts';
 import { summarize } from '../src/services/proposals.ts';
-import { createGatewayCore } from '../src/gateway/mcp.ts';
+import { createGatewayCore, unwrapCall } from '../src/gateway/mcp.ts';
 import { classify, assertUrlAllowed, checkAddress, createGuardedFetch, managedHost, policyForUpstream, policyFromEnv } from '../src/lib/ssrf.ts';
 import http from 'node:http';
 import { Pinning, toolHash, stable } from '../src/services/pins.ts';
@@ -244,6 +244,27 @@ await check('SSRF: guarded fetch refuses before connecting', async () => {
   srv.close();
   must(!errs.length && hits === 1 && open === 'ok', `${errs.join('; ')} hits=${hits}`);
   return 'localhost (lookup path) and 127.0.0.1 (literal path) refused; the server saw only the unguarded control request';
+});
+
+await check('guarded fetch: one retry when the request was never sent', async () => {
+  const net = await import('node:net');
+  let conns = 0;
+  const srv = net.createServer(s => { conns++; s.end('HTTP/1.1 500 x\r\ncontent-length: 0\r\n\r\n'); });   // not TLS: the handshake fails
+  await new Promise(r => srv.listen(0, '127.0.0.1', r));
+  const port = srv.address().port;
+  const f = createGuardedFetch(policyFromEnv({ SSRF_GUARD: 'off' }));
+  const code = async (u, init) => { try { await f(u, init); return 'ok'; } catch (e) { return e.cause?.code ?? e.message; } };
+  const tlsCode = await code(`https://127.0.0.1:${port}/mcp`, { method: 'POST', body: '{}' });
+  const tlsConns = conns; conns = 0;
+  const streamCode = await code(`https://127.0.0.1:${port}/mcp`, { method: 'POST', body: new Blob(['{}']).stream(), duplex: 'half' });
+  const streamConns = conns; conns = 0;
+  const status = await f(`http://127.0.0.1:${port}/mcp`, { method: 'POST', body: '{}' }).then(r => r.status);
+  const httpConns = conns;
+  srv.close();
+  must(tlsCode === 'ERR_SSL_WRONG_VERSION_NUMBER' && tlsConns === 2, `tls: ${tlsCode}, ${tlsConns} connections`);
+  must(streamConns === 1, `stream body: ${streamConns} connections (${streamCode})`);
+  must(status === 500 && httpConns === 1, `an answer (500) is never retried: ${httpConns} connections`);
+  return 'failed handshake: tried twice, then the error; a stream body once; a 500 answer once';
 });
 
 await check('pinning: trust on first use, change hides, approval restores', async () => {
@@ -814,6 +835,24 @@ await check('E: Gemini down before any tool -> the fallback answers the turn', a
   must(second.messages.at(-2).tool_calls?.[0]?.id === 'c1', 'assistant tool_calls not kept');
   return 'flash, lite down -> groq; tool ran once with parsed args; result sent as role tool with the call id, wrapped; <think> stripped';
 });
+await check('E: a model request that never left is sent once more; a reset is not', async () => {
+  resetPrimaryRest();
+  const connectErr = () => Object.assign(new TypeError('fetch failed'), { cause: { code: 'UND_ERR_CONNECT_TIMEOUT' } });
+  const g = fakeGroq([{ content: 'answered on the second try' }]);
+  let tries = 0;
+  const r = await agent({ generate: down, fetch: async (u, init) => { if (tries++ === 0) throw connectErr(); return g.f(u, init); } });
+  must(!r.err && r.text === 'answered on the second try' && tries === 2, `${r.err} ${r.text} tries=${tries}`);
+  resetPrimaryRest();
+  let tries2 = 0;
+  const r2 = await agent({ generate: down, fetch: async () => { tries2++; throw connectErr(); } });
+  const fail = r2.events.find(e => e.type === 'error')?.message ?? r2.err ?? '';
+  must(tries2 === 2 && /connection failed \(UND_ERR_CONNECT_TIMEOUT\)/.test(fail), `tries=${tries2} ${fail}`);
+  resetPrimaryRest();
+  let tries3 = 0;
+  await agent({ generate: down, fetch: async () => { tries3++; throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } }); } });
+  must(tries3 === 1, `a reset (may have arrived) was retried: ${tries3}`);
+  return 'connect timeout -> second try answered; twice -> "connection failed (UND_ERR_CONNECT_TIMEOUT)"; a reset is not retried';
+});
 await check('E: Gemini rests 60 s after a failover; the next turn starts on the fallback', async () => {
   let geminiCalls = 0;
   const g = fakeGroq([{ content: 'second answer' }]);
@@ -1009,6 +1048,22 @@ await check('P5: a hosted server\'s objects (fake cluster)', async () => {
   const bad = await hostedSteps({ ...env, allowedImages: ['docker.io/mcp/'] }, row)[0].run(null).then(() => 'ran', e => e.message);
   must(/not allowed/.test(bad), bad);
   return 'restricted pod (non-root, no token, read-only root, full image); default-deny + gateway-only ingress; token kept on re-run; foreign namespace not adopted; image re-checked';
+});
+
+await check('AR: a call through gateway__call_tool is judged as the real tool', async () => {
+  const u = unwrapCall('gateway__call_tool', { name: 'nyc__create_product', arguments: { name: 'Mug' } });
+  must(u.name === 'nyc__create_product' && u.args.name === 'Mug', JSON.stringify(u));
+  must(unwrapCall('woo__list_orders', { a: 1 }).name === 'woo__list_orders' && unwrapCall('gateway__call_tool', { name: 5, arguments: [1] }).name === '' && Object.keys(unwrapCall('gateway__call_tool', { name: 'x', arguments: [1] }).args).length === 0, 'odd shapes');
+  // The agent hands needs() the arguments, so a write wrapped in call_tool still becomes a proposal.
+  const proposed = [], ran = [];
+  const generate = async () => ({ candidates: [{ content: { role: 'model', parts: [{ functionCall: { name: 'gateway__call_tool', args: { name: 'nyc__create_product', arguments: { name: 'Mug' } } } }] } }] });
+  const writes = new Set(['nyc__create_product']);
+  await runAgent({ cfg: { apiKey: 'x', models: ['m'], timeoutMs: 1000, maxSteps: 2 }, user: { email: 'a@x', name: null }, history: [{ role: 'user', text: 'go' }],
+    tools: [{ name: 'gateway__call_tool', inputSchema: { type: 'object' } }], toolSearch: true, exec: async n => { ran.push(n); return { text: '{}', isError: false, outcome: 'ok', durationMs: 1 }; },
+    emit: () => {}, signal: new AbortController().signal, generate,
+    confirm: { needs: (n, a) => writes.has(unwrapCall(n, a).name), propose: async (n, a) => { const x = unwrapCall(n, a); proposed.push(x); return { id: 'p', summary: 's' }; } } });
+  must(!ran.length && proposed.length === 1 && proposed[0].name === 'nyc__create_product' && proposed[0].args.name === 'Mug', `ran ${ran}, proposed ${JSON.stringify(proposed)}`);
+  return 'unwrapped to the named tool and its arguments; a write sent through call_tool is proposed, not run';
 });
 
 console.log(failed ? `UNIT CHECK FAILED (${failed})` : 'UNIT CHECK PASSED');

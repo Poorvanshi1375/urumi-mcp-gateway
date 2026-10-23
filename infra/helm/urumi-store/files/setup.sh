@@ -40,7 +40,9 @@ if [ "$current" != "$WOO_VERSION" ]; then
   log "installing WooCommerce $WOO_VERSION (found: ${current:-none})"
   # wordpress.org downloads from inside the cluster fail now and then: retry before failing the Job.
   for try in 1 2 3; do
-    wp plugin install woocommerce --version="$WOO_VERSION" --force && break
+    # A pre-baked zip (woocommerce.pluginImage) is installed from the file; otherwise downloaded.
+    if [ -f /plugin/woocommerce.zip ]; then wp plugin install /plugin/woocommerce.zip --force && break
+    else wp plugin install woocommerce --version="$WOO_VERSION" --force && break; fi
     [ "$try" = 3 ] && exit 1
     log "WooCommerce download failed (attempt $try); retrying in 10 s"; sleep 10
   done

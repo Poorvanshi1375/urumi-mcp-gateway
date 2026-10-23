@@ -22,6 +22,7 @@ export type HostedEnv = {
   serviceAccount: string;       // the provisioner's own account (the tenant role binding's subject)
   tenantRole: string;           // the ClusterRole bound in each tenant namespace
   allowedImages: string[];
+  bridgeImage?: string;         // mcp-bridge, for stdio servers (P12)
 };
 
 export const SIZES: Record<string, { cpu: string; memory: string }> = {
@@ -48,8 +49,11 @@ export function hostedSteps(env: HostedEnv, row: HostedRow): Step<null>[] {
   const apply = async (obj: K8sObject) => { await env.k8s.apply(obj); return 'done' as const; };
   return [
     { name: 'image', run: async () => {
-      if (row.transport !== 'http') throw new Error(`transport ${row.transport} is not supported yet (only http)`);
       checkImage(row.image, env.allowedImages);   // again: the allowlist may have changed since the row was made
+      if (row.transport === 'stdio') {
+        if (!env.bridgeImage) throw new Error('stdio servers need the mcp-bridge image (provisioner.hosted.bridgeImage)');
+        if (!Array.isArray(row.command) || !row.command.length) throw new Error('a stdio server needs a command');
+      }
       return 'done';
     } },
     { name: 'namespace', run: async () => {
@@ -91,19 +95,27 @@ export function hostedSteps(env: HostedEnv, row: HostedRow): Step<null>[] {
     { name: 'workload', run: async () => {
       const image = checkImage(row.image, env.allowedImages).full;   // in full, as the image admission policy expects
       const plainEnv = Object.entries((row.env ?? {}) as Record<string, string>).map(([name, value]) => ({ name, value: String(value) }));
+      // stdio (P12): an init container copies mcp-bridge into the pod; the bridge serves HTTP on the
+      // port and runs the server's own command as its child.
+      const stdio = row.transport === 'stdio';
+      const bridge = stdio ? checkImage(env.bridgeImage!, env.allowedImages).full : null;
+      const sec = { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ['ALL'] } };
       await env.k8s.apply({ apiVersion: 'apps/v1', kind: 'Deployment', metadata: meta('mcp'), spec: {
         replicas: 1, selector: { matchLabels: { 'urumi.dev/role': 'mcp' } },
         template: { metadata: { labels: { 'urumi.dev/role': 'mcp', ...labels(env) } }, spec: {
           automountServiceAccountToken: false, enableServiceLinks: false,
           securityContext: { runAsNonRoot: true, runAsUser: RUN_AS, runAsGroup: RUN_AS, seccompProfile: { type: 'RuntimeDefault' } },
+          ...(stdio ? { initContainers: [{ name: 'bridge', image: bridge, imagePullPolicy: 'IfNotPresent', command: ['cp', '/mcp-bridge', '/bridge/mcp-bridge'],
+            resources: { requests: { cpu: '10m', memory: '16Mi' }, limits: { cpu: '100m', memory: '32Mi' } }, securityContext: sec, volumeMounts: [{ name: 'bridge', mountPath: '/bridge' }] }] } : {}),
           containers: [{ name: 'mcp', image, imagePullPolicy: 'IfNotPresent',
-            env: [...plainEnv, { name: 'PORT', value: String(row.port) }], envFrom: [{ secretRef: { name: 'hosted-env' } }],
+            ...(stdio ? { command: ['/bridge/mcp-bridge', '--', ...(row.command as string[])] } : {}),
+            env: [...plainEnv, { name: 'PORT', value: String(row.port) }, ...(stdio ? [{ name: 'MCP_PATH', value: row.path }] : [])], envFrom: [{ secretRef: { name: 'hosted-env' } }],
             ports: [{ name: 'mcp', containerPort: row.port }],
             readinessProbe: { tcpSocket: { port: row.port }, periodSeconds: 5 }, livenessProbe: { tcpSocket: { port: row.port }, initialDelaySeconds: 15, periodSeconds: 20 },
             resources: { requests: size, limits: size },
             securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ['ALL'] } },
-            volumeMounts: [{ name: 'tmp', mountPath: '/tmp' }] }],
-          volumes: [{ name: 'tmp', emptyDir: { sizeLimit: '64Mi' } }] } } } } as K8sObject);
+            volumeMounts: [{ name: 'tmp', mountPath: '/tmp' }, ...(stdio ? [{ name: 'bridge', mountPath: '/bridge', readOnly: true }] : [])] }],
+          volumes: [{ name: 'tmp', emptyDir: { sizeLimit: '64Mi' } }, ...(stdio ? [{ name: 'bridge', emptyDir: { sizeLimit: '32Mi' } }] : [])] } } } } as K8sObject);
       return apply({ apiVersion: 'v1', kind: 'Service', metadata: meta('mcp'), spec: { type: 'ClusterIP', selector: { 'urumi.dev/role': 'mcp' }, ports: [{ name: 'mcp', port: row.port, targetPort: row.port }] } } as K8sObject);
     } },
     { name: 'pods_ready', run: async () => {
@@ -157,8 +169,8 @@ export function hostedTeardown(env: HostedEnv, row: HostedRow): Step<null>[] {
 }
 
 // The last Warning event in the namespace, for a timed-out step ("Back-off pulling image ...").
-export async function lastWarning(env: HostedEnv, row: HostedRow): Promise<string | null> {
-  const events = await env.k8s.list<{ type?: string; reason?: string; message?: string; lastTimestamp?: string; eventTime?: string }>('Event', hostedNamespace(row.prefix)).catch(() => []);
+export async function lastWarning(env: HostedEnv, row: HostedRow, namespace = hostedNamespace(row.prefix)): Promise<string | null> {
+  const events = await env.k8s.list<{ type?: string; reason?: string; message?: string; lastTimestamp?: string; eventTime?: string }>('Event', namespace).catch(() => []);
   const w = events.filter(e => e.type === 'Warning').sort((a, b) => String(a.lastTimestamp ?? a.eventTime).localeCompare(String(b.lastTimestamp ?? b.eventTime))).at(-1);
   return w ? `${w.reason}: ${w.message}`.slice(0, 200) : null;
 }

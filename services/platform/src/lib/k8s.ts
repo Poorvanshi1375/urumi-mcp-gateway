@@ -16,6 +16,7 @@ export class K8sError extends Error {
 // kind -> [API group path, plural, namespaced]. Only the kinds the provisioner creates or reads.
 const KINDS: Record<string, [string, string, boolean]> = {
   Namespace: ['api/v1', 'namespaces', false],
+  PersistentVolume: ['api/v1', 'persistentvolumes', false],
   Secret: ['api/v1', 'secrets', true],
   ConfigMap: ['api/v1', 'configmaps', true],
   Service: ['api/v1', 'services', true],

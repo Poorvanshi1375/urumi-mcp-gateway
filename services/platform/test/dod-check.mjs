@@ -211,10 +211,15 @@ await check('delete the ship-mcp pod -> others unaffected, ship self-heals', asy
 // 2. Stop the server completely (no pods): this is the state the dashboard must show.
 await check('stop ship (0 pods) -> ship shows Unreachable', async () => {
   const t0 = Date.now();
+  const pods = execSync(`kubectl get pod -n ${NS} -l app=ship-mcp,app.kubernetes.io/instance=platform -o name`, { encoding: 'utf8' }).trim().split('\n').filter(Boolean);
   execSync(`kubectl scale ${SHIP} --replicas=0`, { stdio: 'ignore' });
-  const s = await waitFor(async () => { const s = await server('ship'); return s.status === 'unreachable' && s; }, 90000, 300);
+  // A pod being stopped still answers for a few seconds (its preStop pause), and each replica learns
+  // of the outage at its own health check: the checks below start only when the pod is gone and
+  // every replica says Unreachable (four reads, spread over the replicas).
+  if (pods.length) execSync(`kubectl wait -n ${NS} --for=delete ${pods.join(' ')} --timeout=90s`, { stdio: 'ignore' });
+  const s = await waitFor(async () => { const all = await Promise.all([1, 2, 3, 4].map(() => server('ship'))); return all.every(x => x.status === 'unreachable') && all[0]; }, 90000, 300);
   must(s, `ship still ${(await server('ship')).status} after 90 s`);
-  return `scaled to 0; Unreachable after ${Date.now() - t0} ms: ${s.error}`;
+  return `scaled to 0; pod gone and Unreachable on every replica after ${Date.now() - t0} ms: ${s.error}`;
 });
 await check('while ship is down: list is fast and has woo, not ship', async () => {
   const [tools, ms] = await timed(names(member));

@@ -1,6 +1,6 @@
 import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate } from 'react-router';
 import { useQueryClient } from '@tanstack/react-query';
-import { Box, KeyRound, LogOut, MessageSquare, PlugZap, ScrollText, Server, Users } from 'lucide-react';
+import { Box, KeyRound, Store, LogOut, MessageSquare, PlugZap, ScrollText, Server, Users } from 'lucide-react';
 import { api, ApiError, usableTools, useFeatures, useMe, useServers, type User } from './api';
 import { Avatar } from './ui';
 
@@ -13,7 +13,10 @@ export const Mark = ({ size = 28 }: { size?: number }) => (
 
 // Navigation grouped by what people come to do.
 const sections = [
-  { label: 'Workspace', items: [{ to: '/chat', label: 'Chat', icon: MessageSquare }] },
+  { label: 'Workspace', items: [
+    { to: '/chat', label: 'Chat', icon: MessageSquare },
+    { to: '/stores', label: 'Stores', icon: Store, admin: true, feature: 'stores' as const },
+  ] },
   { label: 'Gateway', items: [
     { to: '/servers', label: 'Servers', icon: Server },
     { to: '/hosted', label: 'Hosted servers', icon: Box, admin: true, feature: 'provisioner' as const },
@@ -26,7 +29,7 @@ const sections = [
   ] },
 ];
 const crumbs: Record<string, [string, string]> = {
-  '/chat': ['Workspace', 'Chat'], '/servers': ['Gateway', 'Servers'], '/audit': ['Gateway', 'Audit log'],
+  '/chat': ['Workspace', 'Chat'], '/stores': ['Workspace', 'Stores'], '/servers': ['Gateway', 'Servers'], '/audit': ['Gateway', 'Audit log'],
   '/connect': ['Gateway', 'Connect'], '/hosted': ['Gateway', 'Hosted servers'], '/keys': ['Access', 'API keys'], '/users': ['Access', 'People'],
 };
 
@@ -86,7 +89,7 @@ function Sidebar({ user }: { user: User }) {
       <div className="flex items-center gap-2.5 px-2"><Mark /><span className="text-[16px] font-semibold tracking-[-0.01em]">Urumi Gateway</span></div>
       <nav className="grid gap-5 max-md:flex max-md:flex-wrap max-md:gap-1">
         {sections.map(sec => {
-          const items = sec.items.filter(n => (!('admin' in n && n.admin) || user.role === 'admin') && (!('feature' in n) || Boolean(features?.provisioner)));
+          const items = sec.items.filter(n => (!('admin' in n && n.admin) || user.role === 'admin') && (!('feature' in n) || Boolean(features?.[(n as { feature: 'provisioner' | 'stores' }).feature])));
           if (!items.length) return null;
           return (
             <div key={sec.label} className="grid gap-0.5 max-md:flex max-md:flex-wrap">

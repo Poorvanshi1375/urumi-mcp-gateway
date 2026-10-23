@@ -26,6 +26,10 @@ export type WooApi = {
   siteIndex(): Promise<{ name?: string; home?: string; url?: string; timezone_string?: string; gmt_offset?: number | string }>;
 };
 
+// The site index fields used (the index is large): the store's name and home URL (AS), and its
+// timezone. Real WordPress returns only these, so a missing one here is missing in every result.
+export const SITE_FIELDS = 'name,home,timezone_string,gmt_offset';
+
 export function createWooClient(cfg: WooConfig): WooApi {
   const signingHost = new URL(cfg.signingBaseUrl).hostname;
   const lookup: any = (host: string, opts: any, cb: any) =>
@@ -50,7 +54,7 @@ export function createWooClient(cfg: WooConfig): WooApi {
   // (e.g. sku=undefined matches nothing), so optional params are dropped here.
   const defined = (params: Record<string, unknown> = {}) =>
     Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== null));
-  const site = new URL('wp-json/?_fields=name,timezone_string,gmt_offset', cfg.signingBaseUrl.replace(/\/?$/, '/'));
+  const site = new URL(`wp-json/?_fields=${SITE_FIELDS}`, cfg.signingBaseUrl.replace(/\/?$/, '/'));
   const siteIndex = () => new Promise<any>((resolve, reject) => {
     const mod = site.protocol === 'https:' ? https : http;
     const req = mod.get(site, { agent: new mod.Agent(agentOpts), timeout: cfg.timeoutMs }, res => {

@@ -82,6 +82,14 @@ export function loadConfig() {
       maxServers: int('HOSTED_MAX_SERVERS', 5),
       timeoutMs: int('HOSTED_TIMEOUT_MINUTES', 3) * 60_000,
     },
+    // Bonus stores: how many, under which host, how long one may take, and the URL browsers use.
+    stores: {
+      enabled: process.env.STORES === 'on',
+      max: int('STORE_MAX', 3),
+      baseHost: process.env.STORE_BASE_HOST ?? 'store.localhost',
+      timeoutMs: int('STORE_TIMEOUT_MINUTES', 10) * 60_000,
+      homeUrlTemplate: process.env.STORE_HOME_URL_TEMPLATE ?? 'http://{host}',
+    },
     // Members with no rule for a tool: 'allow' (every tool) or 'readOnly' (only readOnlyHint tools).
     memberDefault: (process.env.MEMBER_DEFAULT === 'readOnly' ? 'readOnly' : 'allow') as 'allow' | 'readOnly',
     // e.g. https://app.example.com (no trailing slash): the OAuth issuer; /mcp under it is the resource.

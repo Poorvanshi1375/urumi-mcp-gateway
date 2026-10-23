@@ -42,3 +42,5 @@ secrets:
 # RBAC and admission policies. Idle until its steps land (P5, P9).
 provisioner:
   enabled: true
+  stores:
+    max: 2                                     # 8 GiB node: two extra stores fit (see docs/provisioner.md)

@@ -7,10 +7,11 @@ import type { Db } from '../db/client.ts';
 import { verifyPassword } from '../lib/crypto.ts';
 import { authenticate } from '../gateway/auth.ts';
 import type { UpstreamManager } from '../gateway/upstream-manager.ts';
-import { newRequestId, type GatewayCore } from '../gateway/mcp.ts';
+import { CALL_TOOL, newRequestId, SEARCH_TOOL, searchModeTools, unwrapCall, type GatewayCore } from '../gateway/mcp.ts';
 import type { Principal } from '../gateway/auth.ts';
 import { ALL_TOOLS, asksInChat, listRules, setConfirmRule, setMemberRule, type Permissions } from '../services/permissions.ts';
 import { createHosted, deleteHosted, findHosted, HostedError, listHosted, publicHosted, retryHosted, SIZES, tenantNameConflict, type HostedLimits } from '../services/hosted.ts';
+import { COUNTRIES, CURRENCIES, createStore, deleteStore, findStore, listStores, publicStore, retryStore, TIMEZONES, type StoreLimits } from '../services/stores.ts';
 import { createProposal, decide, declineWaiting, listWaiting, ProposalError, publicProposal, setProposalAudit, summarize } from '../services/proposals.ts';
 import { runAgent, summarizeConfirmed, type AgentEvent, type ChatConfig, type ToolExec } from '../chat/agent.ts';
 import type { CredentialCipher } from '../lib/crypto.ts';
@@ -44,7 +45,7 @@ export class HttpError extends Error {
 }
 
 type Deps = { db: Db; cipher: CredentialCipher; manager: UpstreamManager; core: GatewayCore; perms: Permissions; ssrf: SsrfPolicy; pinning: Pinning;
-  features: { toolPinning: boolean; toolSearch: boolean; oauth: boolean; provisioner?: boolean }; hosted: HostedLimits; oauth: OAuthConfig; chat?: ChatConfig; chatLimiter: SharedRateLimiter };
+  features: { toolPinning: boolean; toolSearch: boolean; oauth: boolean; provisioner?: boolean }; hosted: HostedLimits; stores: StoreLimits & { enabled: boolean }; oauth: OAuthConfig; chat?: ChatConfig; chatLimiter: SharedRateLimiter };
 type Me = { user: User; via: 'session' | 'key' };
 
 // Login throttling: services/login-throttle.ts (shared by all replicas through Postgres).
@@ -73,7 +74,7 @@ const serverPatch = serverFields.partial();
 // The chat agent acts as the signed-in user; it has no API key of its own.
 const principalOf = (user: User): Principal => ({ userId: user.id, email: user.email, role: user.role as Principal['role'], apiKeyId: null, keyPrefix: null });
 
-export function registerApi(app: FastifyInstance, { db, cipher, manager, core, perms, ssrf, pinning, features, hosted, oauth, chat, chatLimiter }: Deps) {
+export function registerApi(app: FastifyInstance, { db, cipher, manager, core, perms, ssrf, pinning, features, hosted, stores, oauth, chat, chatLimiter }: Deps) {
   // Refuse URLs the gateway must not connect to, with the reason (the same check runs again on
   // every connection, so this is for a clear error, not the only line of defence).
   const checkUrl = (url: string) => assertUrlAllowed(url, ssrf).catch(e => { throw e instanceof SsrfError ? new HttpError(400, e.message) : e; });
@@ -138,6 +139,7 @@ export function registerApi(app: FastifyInstance, { db, cipher, manager, core, p
     };
   }
   // A chat tool call, as the signed-in user, through the same core as /mcp.
+  const chatToolSearchAbove = Number(process.env.CHAT_TOOL_SEARCH_ABOVE ?? 40);
   const execAs = (principal: Principal, requestId: string, onAudit?: (auditId: number) => Promise<unknown>): ToolExec => async (name, args) => {
     const r = await core.callAsUser(principal, 'chat', name, args, { requestId });
     if (r.auditId !== undefined) await onAudit?.(r.auditId);
@@ -377,6 +379,7 @@ export function registerApi(app: FastifyInstance, { db, cipher, manager, core, p
       prefix: z.string().trim(), name: z.string().trim().min(1).max(80), image: z.string().trim().min(1).max(255),
       port: z.number().int().min(1024).max(65535).optional(), path: z.string().regex(/^\/[A-Za-z0-9._~/-]{0,200}$/, 'must start with /').optional(),
       env: envMap, secretEnv: envMap, size: z.enum(SIZES).optional(), needsInternet: z.boolean().optional(),
+      transport: z.enum(['http', 'stdio']).optional(), command: z.array(z.string().min(1).max(1000)).max(32).optional(),
     }).parse(req.body);
     const row = await createHosted(db, cipher, body, user.id, hosted);
     await activity(req, user, 'hosted_requested', row.prefix, { image: row.image, size: row.size, needsInternet: row.needsInternet, secretEnv: Object.keys(body.secretEnv ?? {}) });
@@ -402,7 +405,46 @@ export function registerApi(app: FastifyInstance, { db, cipher, manager, core, p
     return { ok: true };
   });
 
-  app.get('/api/features', async req => { await me(req); return { ...features, memberDefault: perms.memberDefault }; });
+  // Bonus stores (multi-store). Admins only; 404 unless the provisioner and stores are on.
+  const storesOn = () => { if (!features.provisioner || !stores.enabled) throw new HttpError(404, 'stores are off (provisioner.enabled, provisioner.stores.enabled)'); };
+  app.get('/api/stores', async req => {
+    storesOn(); await admin(req);
+    const live = new Map(manager.snapshot().map(s => [s.prefix, s]));
+    return { stores: (await listStores(db)).map(s => ({ ...publicStore(s, stores), server: live.has(s.slug) ? { status: live.get(s.slug)!.status, tools: live.get(s.slug)!.tools.length } : null })),
+      max: stores.max, baseHost: stores.baseHost, currencies: CURRENCIES, countries: COUNTRIES, timezones: TIMEZONES };
+  });
+  app.post('/api/stores', async req => {
+    storesOn();
+    const { user } = await admin(req);
+    const body = z.object({ slug: z.string().trim(), title: z.string().trim().min(1).max(80), currency: z.string().optional(), country: z.string().optional(),
+      timezone: z.string().optional(), adminEmail: email.optional() }).parse(req.body);
+    const row = await createStore(db, body, { id: user.id, email: user.email }, stores);
+    await activity(req, user, 'store_requested', row.slug, { title: row.title, host: row.host, currency: row.currency });
+    return { store: publicStore(row, stores) };
+  });
+  app.post('/api/stores/:id/retry', async req => {
+    storesOn();
+    const { user } = await admin(req);
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    if (!(await retryStore(db, id, stores.timeoutMs))) throw new HttpError(409, 'only a failed store can be retried');
+    const row = await findStore(db, id);
+    await activity(req, user, 'store_requested', row?.slug ?? id, { retry: true });
+    return { store: row && publicStore(row, stores) };
+  });
+  // Deleting a store destroys its data: the request must name it (?confirm=<slug>).
+  app.delete('/api/stores/:id', async req => {
+    storesOn();
+    const { user } = await admin(req);
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    const row = await findStore(db, id);
+    if (!row) throw new HttpError(404, 'no such store');
+    if ((req.query as Record<string, string> | undefined)?.confirm !== row.slug) throw new HttpError(400, `type the store's name to confirm: ?confirm=${row.slug}`);
+    if (!(await deleteStore(db, id))) throw new HttpError(409, 'already being deleted');
+    await activity(req, user, 'store_delete_requested', row.slug);
+    return { ok: true };
+  });
+
+  app.get('/api/features', async req => { await me(req); return { ...features, stores: Boolean(features.provisioner && stores.enabled), memberDefault: perms.memberDefault }; });
   // Tool pinning: approve the current definition of a tool that changed (or appeared) since the
   // last approval. It becomes visible to clients again on every replica.
   app.post('/api/servers/:prefix/tools/:tool/approve', async req => {
@@ -550,17 +592,32 @@ export function registerApi(app: FastifyInstance, { db, cipher, manager, core, p
     const { emit, signal, end } = openStream(reply);
     const principal = principalOf(user);
     const turnId = newRequestId();   // every tool call of this message shares it in the audit
+    // AR: with many tools (each bonus store adds six), the model gets the two search-mode tools
+    // instead of every schema. Calls through gateway__call_tool are unwrapped, so permissions,
+    // confirmation and audit see the real tool.
+    const all = core.listToolsFor(principal);
+    const toolSearch = all.length > chatToolSearchAbove;
+    const direct = execAs(principal, turnId);
     try {
       await runAgent({
-        cfg: chat, user, history: body.messages, tools: core.listToolsFor(principal), emit, signal,
+        cfg: chat, user, history: body.messages, tools: toolSearch ? searchModeTools : all, toolSearch, emit, signal,
         log: (o, m) => req.log.warn(o, m),
-        exec: execAs(principal, turnId),
+        exec: async (name, args) => {
+          if (toolSearch && name === SEARCH_TOOL) {
+            const query = typeof args.query === 'string' ? args.query : '';
+            const hits = core.searchTools(principal, query, Number(args.limit ?? 10));
+            return { text: JSON.stringify({ query, count: hits.length, tools: hits }, null, 2), isError: false, outcome: 'ok', durationMs: 0 };
+          }
+          const u = toolSearch ? unwrapCall(name, args) : { name, args };
+          return direct(u.name, u.args);
+        },
         confirm: chat.confirmWrites ? {
-          needs: core.needsConfirm,
+          needs: (name, args) => (toolSearch && name === SEARCH_TOOL ? false : core.needsConfirm(toolSearch ? unwrapCall(name, args).name : name)),
           propose: async (name, args) => {
-            const t = manager.resolve(name);
-            const summary = summarize(t?.definition?.title ?? t?.tool ?? name, args);
-            const row = await createProposal(db, { userId: user.id, tool: name, args, summary, requestId: turnId });
+            const u = toolSearch && name === CALL_TOOL ? unwrapCall(name, args) : { name, args };
+            const t = manager.resolve(u.name);
+            const summary = summarize(t?.definition?.title ?? t?.tool ?? u.name, u.args);
+            const row = await createProposal(db, { userId: user.id, tool: u.name, args: u.args, summary, requestId: turnId });
             return { id: row.id, summary };
           },
         } : undefined,

@@ -18,9 +18,13 @@ SSH=(ssh -i "$KEY" -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30
 step() { printf '\n==> %s\n' "$*"; }
 
 # Images: deploy exactly what runs locally (tags from the local platform release).
-TAGS=$(helm get values platform -n "$NS" -o json | python3 -c 'import json,sys; v=json.load(sys.stdin); print(v["image"]["tag"], v["wooMcp"]["image"]["tag"], v["shipMcp"]["image"]["tag"])')
-read -r PT WT ST <<<"$TAGS"
+TAGS=$(helm get values platform -n "$NS" -o json | python3 -c 'import json,sys; v=json.load(sys.stdin); p=v.get("provisioner",{}); print(v["image"]["tag"], v["wooMcp"]["image"]["tag"], v["shipMcp"]["image"]["tag"], p.get("image",{}).get("tag",""), p.get("stores",{}).get("pluginImage",""), p.get("hosted",{}).get("bridgeImage",""))')
+read -r PT WT ST PV PLUGIN BRIDGE <<<"$TAGS"
 IMAGES=("urumi-platform:$PT" "urumi-woo-mcp:$WT" "urumi-ship-mcp:$ST")
+# The provisioner (hosted servers, bonus stores) and the pre-baked WooCommerce zip for bonus stores.
+[ -n "$PV" ] && IMAGES+=("urumi-provisioner:$PV")
+[ -n "$PLUGIN" ] && IMAGES+=("$PLUGIN")
+[ -n "$BRIDGE" ] && IMAGES+=("$BRIDGE")
 
 step "k3s $K3S_VERSION on $IP"
 "${SSH[@]}" "command -v k3s >/dev/null && sudo k3s --version | head -1 || (curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' sh -s - --write-kubeconfig-mode 644 --secrets-encryption)"
@@ -95,6 +99,8 @@ step "platform chart (app host=$APP_HOST)"
 # WooCommerce verifies the OAuth signature over the http form of the URL (KT D.4).
 # denyCidrs: the node's own public address, refused as an upstream (the chart cannot know it).
 PSET="--set platform.ssrf.denyCidrs={$IP/32} --set platform.ingress.host=$APP_HOST --set wooMcp.store.signingBaseUrl=http://$STORE_HOST --set image.tag=$PT --set wooMcp.image.tag=$WT --set shipMcp.image.tag=$ST"
+# Bonus stores live at <slug>.store.<ip>.nip.io (plain http first; see docs/provisioner.md).
+PSET="$PSET --set provisioner.image.tag=$PV --set provisioner.stores.baseHost=$STORE_HOST --set provisioner.stores.pluginImage=$PLUGIN --set provisioner.hosted.bridgeImage=$BRIDGE"
 "${SSH[@]}" "export KUBECONFIG=/etc/rancher/k3s/k3s.yaml; cd ~/urumi-helm && \
   helm lint urumi-platform -f urumi-platform/values-prod.yaml $PSET | tail -1 && \
   helm upgrade --install platform urumi-platform -n $NS -f urumi-platform/values-prod.yaml $PSET --wait --timeout 10m | grep -E 'STATUS|REVISION'"

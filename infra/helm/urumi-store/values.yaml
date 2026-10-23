@@ -27,6 +27,9 @@ woocommerce:
   # The WordPress user that owns the REST key: created by the setup Job as a shop_manager (never an
   # administrator), so the key carries shop-manager rights only.
   apiKeyUser: mcp-service
+  # An image holding the WooCommerce zip of this version (infra/images/woocommerce-zip, checked by
+  # SHA-256 at build time): setup installs from it instead of downloading. Empty: download.
+  pluginImage: ""
 
 # Credentials come from a Secret this chart never creates, so no secret value is ever in values
 # or in Helm's release history. scripts/secrets.sh creates it (keys: mysql-root-password,
@@ -102,6 +105,28 @@ networkPolicy:
     podLabels: { app.kubernetes.io/name: traefik }      # k3s / k3d Traefik
   storeApiClients:
     - podLabels: { app: woo-mcp, app.kubernetes.io/instance: platform }   # namespace: defaults to this release's
+  # The cluster DNS, for this store's own MCP server's egress (mcp.enabled).
+  dns:
+    namespace: kube-system
+    podLabels: { k8s-app: kube-dns }
+
+# This store's own MCP server (woo-mcp in this namespace): for bonus stores, which the provisioner
+# creates with mcp.enabled=true and registers as the server <slug>. Off for the default store, whose
+# woo-mcp runs in the platform release.
+mcp:
+  enabled: false
+  image:
+    repository: urumi-woo-mcp
+    tag: ""
+    pullPolicy: IfNotPresent
+  tokenKey: mcp-token          # the bearer token in the store's Secret; the gateway holds a copy
+  signingBaseUrl: ""           # the URL WooCommerce sees in-cluster (http://<host>[:port]); default store.homeUrl
+  gateway:
+    namespace: urumi
+    podLabels: { app: platform, app.kubernetes.io/instance: platform }
+  resources:
+    requests: { cpu: 50m, memory: 96Mi }
+    limits: { cpu: 500m, memory: 256Mi }
 
 ingress:
   enabled: true

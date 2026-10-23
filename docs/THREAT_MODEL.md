@@ -111,6 +111,8 @@ A hosted server is an admin's container image that the platform runs (see [provi
 | The provisioner is compromised (it holds a token and the encryption key) | It accepts no connections. Its Kubernetes rights end at namespaces this install manages, enforced by the API server (admission policies), and cannot read Secrets outside them, bind any other role, or touch the platform namespace. In Postgres it sees only its own tables and the servers it manages (row-level security): no users, keys, sessions, OAuth or audit log, and not the woo or ship rows. |
 | A bug deletes the wrong namespace | It may delete only namespaces carrying this install's labels and its row id; a namespace it did not create is never adopted. |
 
+**Bonus stores** run our own code, so the threats are about containment: each store is a namespace with restricted Pod Security, a quota, and the store chart's NetworkPolicies (MySQL only from its WordPress and setup Job; WordPress only from Traefik and the store's own MCP server; the MCP server only from the gateway, and it reaches only its WordPress). One store cannot reach another store's WordPress or MySQL, or Postgres (checked by `stores-check`); each has its own generated passwords and REST key, made in the cluster and never shown in the dashboard.
+
 **Residual risk:** a hosted image with internet access can send out whatever its own tool calls give it (the arguments of its calls). Its own secret env is visible to it by design. A third-party image will not check the bearer token the platform gives it; the NetworkPolicy is the boundary that matters.
 
 ## What one team member can do to another

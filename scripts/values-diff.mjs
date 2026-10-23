@@ -11,12 +11,15 @@ const PROD_SET = {
   'urumi-store': ['--set', 'store.host=store.203.0.113.10.nip.io', '--set', 'store.homeUrl=https://store.203.0.113.10.nip.io'],
   'urumi-platform': ['--set', 'platform.ingress.host=app.203.0.113.10.nip.io', '--set', 'wooMcp.store.signingBaseUrl=http://store.203.0.113.10.nip.io'],
 };
-const IMAGES = ['--set', 'image.tag=check', '--set', 'wooMcp.image.tag=check', '--set', 'shipMcp.image.tag=check'];
+const IMAGES = ['--set', 'image.tag=check', '--set', 'wooMcp.image.tag=check', '--set', 'shipMcp.image.tag=check', '--set', 'provisioner.image.tag=check'];
 
 // What may differ between environments, by field path (object id + path). Anything else fails.
 const EXPECTED = [
-  [/\.(host|hosts\.\d+)$|\.env\.(WP_HOME_URL|WC_SIGNING_BASE_URL|WORDPRESS_CONFIG_EXTRA|PUBLIC_URL|SSRF_DENY_HOSTS)\.value$/, 'hosts and URLs'],
+  [/\.(host|hosts\.\d+)$|\.env\.(WP_HOME_URL|WC_SIGNING_BASE_URL|WORDPRESS_CONFIG_EXTRA|PUBLIC_URL|SSRF_DENY_HOSTS|STORE_HOME_URL_TEMPLATE|STORE_SIGNING_URL_TEMPLATE|STORE_BASE_HOST)\.value$/, 'hosts and URLs'],
+  [/\.env\.STORE_MAX\.value$/, 'how many bonus stores the node can hold'],
   [/^Service\/store-wordpress\.spec\.ports\.http-\d+\./, "the home URL's port on the store Service (local :9080)"],
+  // The same port for bonus stores: the only extra store values per environment.
+  [/\.env\.STORE_EXTRA_VALUES\.value$/, "the home URL's port on the store Service (local :9080)"],
   [/\.env\.UPSTREAM_HEALTH_INTERVAL_MS\.value$/, 'health-check interval'],
   [/\.tls\b|cert-manager|Middleware\/|router\.middlewares|redirect/, 'TLS and the http to https redirect'],
   [/\.replicas$|HorizontalPodAutoscaler\/|PodDisruptionBudget\//, 'replicas and autoscaling'],

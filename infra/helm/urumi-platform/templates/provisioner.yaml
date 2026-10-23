@@ -37,10 +37,10 @@ rules:
   - apiGroups: [""]
     resources: [namespaces]
     verbs: [get, list, watch, create, patch, delete]
-  # To confirm a deleted store's volumes are released (H8).
+  # To confirm a deleted store's volumes are released (H8): names and claims only, no data.
   - apiGroups: [""]
     resources: [persistentvolumes]
-    verbs: [get]
+    verbs: [get, list]
   # patch: server-side apply sends a PATCH (the rolebindings policy checks it as an UPDATE).
   - apiGroups: [rbac.authorization.k8s.io]
     resources: [rolebindings]
@@ -300,8 +300,9 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: provisioner
-          image: {{ include "urumi-platform.image" . | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The platform image plus Helm and the store chart (infra/images/provisioner).
+          image: "{{ .Values.provisioner.image.repository }}:{{ toString (required "provisioner.image.tag is required (infra/scripts/build-image.sh provisioner)" .Values.provisioner.image.tag) }}"
+          imagePullPolicy: {{ .Values.provisioner.image.pullPolicy }}
           command: ["node", "src/provisioner.ts"]
           env:
             # Its own database role (urumi_provisioner), never the app's or the owner's.
@@ -316,11 +317,21 @@ spec:
             - { name: PROVISIONER_SERVICE_ACCOUNT, value: {{ $sa | quote }} }
             - { name: TENANT_ROLE, value: {{ $tenantRole | quote }} }
             - { name: ALLOWED_IMAGES, value: {{ join "," $images | quote }} }
+            - { name: BRIDGE_IMAGE, value: {{ .Values.provisioner.hosted.bridgeImage | quote }} }
             - { name: HEALTH_PORT, value: "8081" }
             # Hosted servers' secret env and the bearer token it registers are encrypted like every
             # upstream credential, with the platform's key.
             - name: PLATFORM_ENCRYPTION_KEY
               valueFrom: { secretKeyRef: { name: {{ include "urumi-platform.secretName" . }}, key: encryption-key } }
+            {{- $st := .Values.provisioner.stores }}
+            # Bonus stores: the store chart with its own woo-mcp, per environment.
+            - { name: STORES, value: {{ ternary "on" "off" $st.enabled | quote }} }
+            - { name: WOO_MCP_IMAGE_REPOSITORY, value: {{ .Values.wooMcp.image.repository | quote }} }
+            - { name: WOO_MCP_IMAGE_TAG, value: {{ toString .Values.wooMcp.image.tag | quote }} }
+            - { name: WOOCOMMERCE_PLUGIN_IMAGE, value: {{ $st.pluginImage | quote }} }
+            - { name: STORE_HOME_URL_TEMPLATE, value: {{ $st.homeUrlTemplate | quote }} }
+            - { name: STORE_SIGNING_URL_TEMPLATE, value: {{ $st.signingUrlTemplate | quote }} }
+            - { name: STORE_EXTRA_VALUES, value: {{ toJson $st.values | quote }} }
           ports:
             - { name: health, containerPort: 8081 }
           readinessProbe:
@@ -337,6 +348,10 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }   # Helm's cache and the values file of one install
+      volumes:
+        - { name: tmp, emptyDir: { sizeLimit: 128Mi } }
 ---
 # The provisioner accepts no connections (its probes come from the kubelet) and may connect only to
 # DNS, Postgres and the Kubernetes API. It never reaches a tenant pod (H7), an MCP server or the

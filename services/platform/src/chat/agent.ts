@@ -20,7 +20,7 @@ export type AgentEvent =
 export type ToolExec = (name: string, args: Record<string, unknown>) => Promise<{ text: string; isError: boolean; outcome: string; durationMs: number }>;
 // Confirm before writes (C): needs() says whether a call must wait for the user; propose() stores it
 // and returns the proposal the browser shows.
-export type Confirmation = { needs: (name: string) => boolean; propose: (name: string, args: Record<string, unknown>) => Promise<{ id: string; summary: string }> };
+export type Confirmation = { needs: (name: string, args: Record<string, unknown>) => boolean; propose: (name: string, args: Record<string, unknown>) => Promise<{ id: string; summary: string }> };
 
 // apiKey and models are Gemini's (models empty without a Gemini key); fallback is the
 // OpenAI-compatible provider tried after them. forceFallback (CHAT_FORCE_FALLBACK, for checks
@@ -29,7 +29,7 @@ export type ChatConfig = { apiKey: string; models: string[]; timeoutMs: number; 
 
 const MAX_RESULT_CHARS = 12_000;   // keep large results (e.g. DeepWiki pages) from flooding the context
 
-function systemInstruction(user: { email: string; name: string | null }, toolsAvailable: boolean, confirmWrites = false) {
+function systemInstruction(user: { email: string; name: string | null }, toolsAvailable: boolean, confirmWrites = false, toolSearch = false) {
   // The store's timezone and currency are the store's settings, not ours: woo-mcp resolves "today"
   // in the store's timezone and reports the currency (get_store_info), so nothing here is hard-coded.
   const utc = new Date().toISOString().slice(0, 16).replace('T', ' ');
@@ -40,6 +40,8 @@ function systemInstruction(user: { email: string; name: string | null }, toolsAv
     toolsAvailable
       ? 'Use the tools to answer; never invent orders, products, prices or tracking details. Tools are named <server>__<tool> (woo = the store, ship = shipping, deepwiki = documentation for GitHub repos). Call several tools in one step when they are independent.'
       : 'No tools are available right now (all servers are disabled or unreachable). Say so plainly and do not guess data.',
+    'Several stores may be connected: woo is the default store, and every other store\'s tools carry its own name as prefix (for example nyc__list_orders). When the user names a store, use that store\'s tools; when comparing stores, call each store\'s tools; results say which store they come from (store.title). Never mix figures from different stores.',
+    ...(toolSearch ? ['There are many tools, so you get two: gateway__search_tools finds tools (name, description, input schema) by a few words, and gateway__call_tool calls one by its exact name with its arguments. Search first, then call.'] : []),
     'For orders "today" or "yesterday", pass created_on: "today" or "yesterday" to woo__list_orders: the store resolves the day in its own timezone. Call woo__get_store_info when you need the store\'s date or currency, and write prices in that currency (orders also carry it). New products are published unless the user asks for a draft.',
     'Never add up or compute money amounts yourself: use the totals the tools return (for orders, amount_total and count_by_status). If a result says complete: false, it is partial: say so or fetch the next page.',
     'If a tool fails, say which one and why in one line, and continue with what you can do.',
@@ -61,7 +63,8 @@ export function wrapToolOutput(tool: string, text: string): string {
 function failureReason(e: unknown, timeoutMs: number): string {
   if (e instanceof LlmError) return e.status === 429 ? (/quota/i.test(e.message) ? 'quota used up' : 'rate-limited') : `HTTP ${e.status}`;
   if ((e as Error).name === 'TimeoutError') return `no answer within ${Math.round(timeoutMs / 1000)} s`;
-  return (e as Error).name === 'TypeError' ? 'connection failed' : (e as Error).message.slice(0, 120);
+  const code = (e as any)?.cause?.code;
+  return (e as Error).name === 'TypeError' ? `connection failed${code ? ` (${code})` : ''}` : (e as Error).message.slice(0, 120);
 }
 
 // The message for a turn every configured model failed: the first cause matters most (a used-up
@@ -108,13 +111,14 @@ export async function runAgent(opts: {
   generate?: GeminiGenerate;    // the Gemini call; replaceable in tests
   fetch?: typeof fetch;         // the fallback's HTTP client; replaceable in tests
   confirm?: Confirmation;       // absent: every call runs at once (platform.chat.confirmWrites off)
+  toolSearch?: boolean;         // tools are gateway__search_tools and gateway__call_tool (AR)
 }) {
   const { cfg, tools, exec, emit, signal } = opts;
   // Within one answer, an identical call (same tool, same arguments in any key order) runs once and
   // later copies reuse its result: models repeat calls, and a repeated write would duplicate it.
   // Failed calls are forgotten, so a retry after an error still runs.
   const seen = new Map<string, ReturnType<ToolExec>>();
-  const list = candidates(cfg, systemInstruction(opts.user, tools.length > 0, Boolean(opts.confirm)), opts.history, tools, opts);
+  const list = candidates(cfg, systemInstruction(opts.user, tools.length > 0, Boolean(opts.confirm), opts.toolSearch), opts.history, tools, opts);
   if (!list.length) throw new Error('Chat has no language model configured.');
   let idx = 0;
   let toolsRan = false;   // once a tool has run, the turn never moves to another provider
@@ -154,7 +158,7 @@ export async function runAgent(opts: {
     // Confirm before writes (C): reads in this round still run; the first write becomes a proposal
     // and any further write is refused (one change per message). The turn then ends: the model gets
     // no response for the write, so it cannot go on as if it had run.
-    const writes = opts.confirm ? calls.filter(c => opts.confirm!.needs(c.name)) : [];
+    const writes = opts.confirm ? calls.filter(c => opts.confirm!.needs(c.name, c.args ?? {})) : [];
     if (writes.length) {
       await Promise.all(calls.map((c, i) => (writes.includes(c) ? undefined : run(c, i, step))));
       const [first, ...rest] = writes;

@@ -148,6 +148,11 @@ spec:
             - { name: HOSTED_ALLOWED_IMAGES, value: {{ join "," .Values.provisioner.hosted.allowedImages | quote }} }
             - { name: HOSTED_MAX_SERVERS, value: {{ .Values.provisioner.hosted.maxServers | quote }} }
             - { name: HOSTED_TIMEOUT_MINUTES, value: {{ .Values.provisioner.hosted.timeoutMinutes | quote }} }
+            - { name: STORES, value: {{ ternary "on" "off" .Values.provisioner.stores.enabled | quote }} }
+            - { name: STORE_MAX, value: {{ .Values.provisioner.stores.max | quote }} }
+            - { name: STORE_BASE_HOST, value: {{ .Values.provisioner.stores.baseHost | quote }} }
+            - { name: STORE_TIMEOUT_MINUTES, value: {{ .Values.provisioner.stores.timeoutMinutes | quote }} }
+            - { name: STORE_HOME_URL_TEMPLATE, value: {{ .Values.provisioner.stores.homeUrlTemplate | quote }} }
             - { name: MEMBER_DEFAULT, value: {{ $p.permissions.memberDefault | quote }} }
             # The URL clients use: the OAuth issuer, and /mcp under it is the token audience.
             - { name: PUBLIC_URL, value: {{ $p.publicUrl | default (printf "%s://%s" (ternary "https" "http" $p.ingress.tls.enabled) $p.ingress.host) | quote }} }

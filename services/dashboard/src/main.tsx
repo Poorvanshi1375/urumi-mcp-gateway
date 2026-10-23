@@ -13,6 +13,7 @@ import { Users } from './pages/Users';
 import { Connect } from './pages/Connect';
 import { Chat } from './pages/Chat';
 import { HostedServers } from './pages/Hosted';
+import { Stores } from './pages/Stores';
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: true } } });
 
@@ -31,6 +32,7 @@ const router = createBrowserRouter([
       { path: '/connect', element: <Connect /> },
       { path: '/users', element: <RequireAdmin><Users /></RequireAdmin> },
       { path: '/hosted', element: <RequireAdmin><HostedServers /></RequireAdmin> },
+      { path: '/stores', element: <RequireAdmin><Stores /></RequireAdmin> },
       { path: '*', element: <Navigate to="/chat" replace /> },
     ],
   },

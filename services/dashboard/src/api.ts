@@ -10,7 +10,7 @@ export type ToolDefinition = { title: string | null; description: string; inputS
 export type Tool = { name: string; title?: string | null; description?: string; inputSchema?: unknown; outputSchema?: unknown; annotations?: unknown; exposedAs?: string; memberAllowed?: boolean; flags?: string[]; invalid?: string | null;
   chatConfirm?: 'auto' | 'always' | 'never'; asksInChat?: boolean;
   pending?: boolean; approved?: ToolDefinition | null };
-export type Features = { toolPinning: boolean; toolSearch: boolean; oauth: boolean; validateArguments?: boolean; provisioner?: boolean; memberDefault?: 'allow' | 'readOnly' };
+export type Features = { toolPinning: boolean; toolSearch: boolean; oauth: boolean; validateArguments?: boolean; provisioner?: boolean; stores?: boolean; memberDefault?: 'allow' | 'readOnly' };
 export type ChatStatus = { enabled: boolean; model: string | null; tools: number; toolNames?: string[]; confirmWrites?: boolean };
 export const useChatStatus = () => useQuery({ queryKey: ['chat-status'], queryFn: () => api<ChatStatus>('GET', '/api/chat/status') });
 export const useFeatures = () => useQuery({ queryKey: ['features'], queryFn: () => api<Features>('GET', '/api/features'), staleTime: 60_000 });
@@ -136,7 +136,7 @@ export const errorText = (e: unknown) =>
 // ---- hosted MCP servers (stand-out 5): desired state; the provisioner runs them
 export type HostedState = 'provisioning' | 'ready' | 'failed' | 'deleting';
 export type Hosted = {
-  id: string; prefix: string; name: string; image: string; transport: string; port: number; path: string; env: Record<string, string>; secretEnvKeys: string[];
+  id: string; prefix: string; name: string; image: string; transport: string; command: string[] | null; port: number; path: string; env: Record<string, string>; secretEnvKeys: string[];
   size: 'small' | 'medium' | 'large'; needsInternet: boolean; state: HostedState; step: string | null; error: string | null; attempts: number;
   createdAt: string; readyAt: string | null; deadlineAt: string | null; namespace: string; url: string;
   server: { status: ServerStatus; tools: number } | null;
@@ -147,4 +147,17 @@ export const useHosted = () => useQuery({
   queryKey: ['hosted'],
   queryFn: () => api<HostedList>('GET', '/api/hosted'),
   refetchInterval: q => (q.state.data?.servers.some(s => s.state === 'provisioning' || s.state === 'deleting') ? 3000 : 30_000),
+});
+
+// ---- bonus stores (multi-store): the provisioner installs the store chart per store
+export type Store = {
+  id: string; slug: string; title: string; host: string; url: string; adminUrl: string; adminUser: string; adminEmail: string;
+  currency: string; country: string; timezone: string; state: HostedState; step: string | null; error: string | null; attempts: number;
+  createdAt: string; readyAt: string | null; namespace: string; adminPasswordCommand: string; server: { status: ServerStatus; tools: number } | null;
+};
+export type StoreList = { stores: Store[]; max: number; baseHost: string; currencies: string[]; countries: Record<string, string>; timezones: string[] };
+export const useStores = () => useQuery({
+  queryKey: ['stores'],
+  queryFn: () => api<StoreList>('GET', '/api/stores'),
+  refetchInterval: q => (q.state.data?.stores.some(s => s.state === 'provisioning' || s.state === 'deleting') ? 3000 : 30_000),
 });

@@ -8,7 +8,7 @@ import { hostedServers, stores, upstreams } from '../db/schema.ts';
 import type { CredentialCipher } from '../lib/crypto.ts';
 import { checkImage } from '../lib/image-ref.ts';
 import { requestDelete, requestRetry } from '../provision/rows.ts';
-import { PREFIX_RE } from './upstreams.ts';
+import { deleteUpstream, PREFIX_RE } from './upstreams.ts';
 
 export type Hosted = typeof hostedServers.$inferSelect;
 export const PROVISION_CHANNEL = 'urumi_provision';
@@ -24,7 +24,7 @@ export class HostedError extends Error {
 }
 
 export type HostedInput = {
-  prefix: string; name: string; image: string; port?: number; path?: string;
+  prefix: string; name: string; image: string; port?: number; path?: string; transport?: 'http' | 'stdio'; command?: string[];
   env?: Record<string, string>; secretEnv?: Record<string, string>; size?: (typeof SIZES)[number]; needsInternet?: boolean;
 };
 export type HostedLimits = { allowedImages: string[]; maxServers: number; timeoutMs: number };
@@ -57,6 +57,9 @@ export async function createHosted(db: Db, cipher: CredentialCipher, input: Host
   try { image = checkImage(input.image, limits.allowedImages).full; } catch (e) { throw new HostedError(400, (e as Error).message); }
   checkEnv('env', input.env);
   checkEnv('secret env', input.secretEnv);
+  const transport = input.transport ?? 'http';
+  if (transport === 'stdio' && !input.command?.length) throw new HostedError(400, 'a stdio server needs its command, e.g. ["node", "server.js"]');
+  if (transport === 'http' && input.command?.length) throw new HostedError(400, 'a command is only used for stdio servers (an http server runs its image as it is)');
   const row = await db.transaction(async tx => {
     // One create at a time: the name check and the limit count below cannot race another create.
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext('urumi-tenant-names'))`);
@@ -67,6 +70,7 @@ export async function createHosted(db: Db, cipher: CredentialCipher, input: Host
     const secret = input.secretEnv && Object.keys(input.secretEnv).length ? cipher.encrypt(JSON.stringify(input.secretEnv)) : null;
     const [r] = await tx.insert(hostedServers).values({
       prefix: input.prefix, name: input.name, image, port: input.port ?? 8080, path: input.path ?? '/mcp', env: input.env ?? {},
+      transport, command: transport === 'stdio' ? input.command : null,
       secretEnvEnc: secret, size: input.size ?? 'small', needsInternet: input.needsInternet ?? false, createdBy: by,
       deadlineAt: new Date(Date.now() + limits.timeoutMs),
     }).returning();
@@ -80,9 +84,15 @@ export const wake = (db: Db) => db.execute(sql`select pg_notify(${PROVISION_CHAN
 export const listHosted = (db: Db) => db.select().from(hostedServers).orderBy(hostedServers.createdAt);
 export const findHosted = async (db: Db, id: string) => (await db.select().from(hostedServers).where(eq(hostedServers.id, id)).limit(1))[0];
 
+// Delete: the tools go at once, here, whatever the provisioner is busy with (its own unregister step
+// then finds nothing to do); the namespace and the row follow.
+export async function unregisterManaged(db: Db, managedId: string) {
+  const [row] = await db.select({ prefix: upstreams.prefix }).from(upstreams).where(eq(upstreams.managedId, managedId)).limit(1);
+  if (row) await deleteUpstream(db, row.prefix, { managed: true });
+}
 export async function deleteHosted(db: Db, id: string): Promise<boolean> {
   const ok = await requestDelete(db, 'hosted_servers', id);
-  if (ok) await wake(db);
+  if (ok) { await unregisterManaged(db, id); await wake(db); }
   return ok;
 }
 export async function retryHosted(db: Db, id: string, timeoutMs: number): Promise<boolean> {
@@ -96,7 +106,7 @@ export function publicHosted(h: Hosted, cipher: CredentialCipher) {
   let secretEnvKeys: string[] = [];
   try { secretEnvKeys = h.secretEnvEnc ? Object.keys(JSON.parse(cipher.decrypt(h.secretEnvEnc))) : []; } catch { secretEnvKeys = ['(unreadable)']; }
   return {
-    id: h.id, prefix: h.prefix, name: h.name, image: h.image, transport: h.transport, port: h.port, path: h.path, env: h.env, secretEnvKeys,
+    id: h.id, prefix: h.prefix, name: h.name, image: h.image, transport: h.transport, command: h.command, port: h.port, path: h.path, env: h.env, secretEnvKeys,
     size: h.size, needsInternet: h.needsInternet, state: h.state, step: h.step, error: h.error, attempts: h.attempts,
     createdAt: h.createdAt, readyAt: h.readyAt, deadlineAt: h.deadlineAt, namespace: `mcp-${h.prefix}`,
     url: `http://mcp.mcp-${h.prefix}.svc.cluster.local:${h.port}${h.path}`,

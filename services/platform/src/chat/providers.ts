@@ -4,6 +4,11 @@
 // reaches another provider: a turn that fails over to the fallback stays there until it ends.
 import type { Tool } from '@modelcontextprotocol/client';
 import type { ChatTurn } from './agent.ts';
+import { failedBeforeSend } from '../lib/ssrf.ts';
+
+// A request that never reached the provider (the connect timed out, the handshake or DNS failed) is
+// tried once more: seen from the cluster, about 1 connect in 25 to a public host is dropped.
+const sendOnce = <T,>(go: () => Promise<T>, signal: AbortSignal) => go().catch(e => { if (!signal.aborted && failedBeforeSend(e)) return go(); throw e; });
 
 export type Call = { name: string; args?: Record<string, unknown>; id?: string };
 export type StepOut = { text: string; calls: Call[] };
@@ -28,12 +33,12 @@ export type GeminiResponse = { candidates?: { content?: Content; finishReason?: 
 export type GeminiGenerate = (apiKey: string, model: string, body: object, signal: AbortSignal, timeoutMs: number) => Promise<GeminiResponse>;
 
 export const geminiGenerate: GeminiGenerate = async (apiKey, model, body, signal, timeoutMs) => {
-  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+  const res = await sendOnce(() => fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
     body: JSON.stringify(body),
     signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
-  });
+  }), signal);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new LlmError(res.status, data?.error?.message ?? `HTTP ${res.status}`);
   return data as GeminiResponse;
@@ -91,12 +96,12 @@ export function openaiChat(o: { cfg: FallbackConfig; system: string; history: Ch
   const messages: Message[] = [{ role: 'system', content: o.system }, ...o.history.map(t => ({ role: t.role, content: t.text }) as Message)];
   const tools = o.tools.map(t => ({ type: 'function', function: { name: t.name, description: (t.description ?? '').slice(0, 1000), parameters: providerSchema(t.inputSchema) } }));
   async function request(signal: AbortSignal) {
-    const res = await doFetch(`${o.cfg.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+    const res = await sendOnce(() => doFetch(`${o.cfg.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${o.cfg.apiKey}` },
       body: JSON.stringify({ model: o.cfg.model, messages, ...(tools.length ? { tools, tool_choice: 'auto' } : {}) }),
       signal: AbortSignal.any([signal, AbortSignal.timeout(o.cfg.timeoutMs)]),
-    });
+    }), signal);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new LlmError(res.status, data?.error?.message ?? `HTTP ${res.status}`, data?.error?.code);
     return data as { choices?: { message?: { content?: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[] } }[] };

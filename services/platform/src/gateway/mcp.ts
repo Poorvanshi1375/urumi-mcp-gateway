@@ -126,7 +126,7 @@ export const newRequestId = () => randomBytes(16).toString('hex');
 // The two tools a client sees in search mode. "gateway" is a reserved prefix.
 export const SEARCH_TOOL = `gateway${SEPARATOR}search_tools`;
 export const CALL_TOOL = `gateway${SEPARATOR}call_tool`;
-const searchModeTools: Tool[] = [
+export const searchModeTools: Tool[] = [
   {
     name: SEARCH_TOOL,
     description: 'Find tools available to you through the gateway. Returns matching tool names, descriptions and input schemas. Search first, then call a tool with gateway__call_tool.',
@@ -138,6 +138,13 @@ const searchModeTools: Tool[] = [
     inputSchema: { type: 'object', properties: { name: { type: 'string' }, arguments: { type: 'object' } }, required: ['name'] },
   },
 ];
+// A call through gateway__call_tool is a call of the tool it names: permissions, confirmation (C)
+// and audit always see the real tool. Any other call is itself.
+export function unwrapCall(name: string, args: Record<string, unknown> | undefined): { name: string; args: Record<string, unknown> } {
+  if (name !== CALL_TOOL) return { name, args: args ?? {} };
+  const inner = args?.arguments;
+  return { name: typeof args?.name === 'string' ? args.name : '', args: inner && typeof inner === 'object' && !Array.isArray(inner) ? inner as Record<string, unknown> : {} };
+}
 const textResult = (value: unknown, isError = false) => ({ content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }], ...(isError ? { isError } : {}) });
 
 // The gateway's own MCP server: one endpoint, a fresh low-level Server per request (stateless).

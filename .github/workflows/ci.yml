@@ -42,7 +42,7 @@ jobs:
 
       - name: Helm lint (both charts, both values files)
         run: |
-          IMG="--set image.tag=ci --set wooMcp.image.tag=ci --set shipMcp.image.tag=ci"
+          IMG="--set image.tag=ci --set wooMcp.image.tag=ci --set shipMcp.image.tag=ci --set provisioner.image.tag=ci"
           helm lint --strict infra/helm/urumi-store -f infra/helm/urumi-store/values-local.yaml
           helm lint --strict infra/helm/urumi-store -f infra/helm/urumi-store/values-prod.yaml \
             --set store.host=store.203.0.113.10.nip.io --set store.homeUrl=https://store.203.0.113.10.nip.io

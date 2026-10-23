@@ -186,6 +186,10 @@ networkPolicy:
 # Needs Kubernetes 1.30+ (ValidatingAdmissionPolicy v1); an older API server refuses the install.
 provisioner:
   enabled: false
+  image:
+    repository: urumi-provisioner
+    tag: ""                       # infra/scripts/build-image.sh provisioner
+    pullPolicy: IfNotPresent
   resources:
     requests: { cpu: 50m, memory: 128Mi }
     limits: { cpu: 500m, memory: 384Mi }
@@ -200,7 +204,18 @@ provisioner:
     # (an admission policy): <registry>/<path prefix>, matched on the normalised name.
     allowedImages: ["docker.io/library/urumi-", "docker.io/mcp/"]
     maxServers: 5
+    bridgeImage: ""           # mcp-bridge (infra/images/mcp-bridge), for stdio servers; empty: http only
     timeoutMinutes: 3        # a hosted server not ready by then is failed, with the pod's reason
+  # Bonus stores (multi-store): the urumi-store chart per store in store-<slug>, host <slug>.<baseHost>.
+  stores:
+    enabled: true
+    max: 3
+    timeoutMinutes: 10
+    baseHost: store.localhost
+    homeUrlTemplate: "http://{host}"       # the URL browsers use ({host} = <slug>.<baseHost>)
+    signingUrlTemplate: "http://{host}"    # the URL WooCommerce sees in-cluster
+    pluginImage: ""                        # the pre-baked WooCommerce zip image; empty: download
+    values: {}                             # more urumi-store values for every bonus store
 
 migrate:
   resources:

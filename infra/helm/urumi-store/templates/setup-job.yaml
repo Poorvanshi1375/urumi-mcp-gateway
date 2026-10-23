@@ -37,6 +37,22 @@ spec:
         runAsUser: {{ required "wordpress.runAsUser is required (upgrading with --reuse-values skips new chart defaults: use --reset-then-reuse-values)" .Values.wordpress.runAsUser }}
         runAsGroup: {{ required "wordpress.runAsUser is required (upgrading with --reuse-values skips new chart defaults: use --reset-then-reuse-values)" .Values.wordpress.runAsUser }}
         seccompProfile: { type: RuntimeDefault }
+      {{- with .Values.woocommerce.pluginImage }}
+      # The pre-baked WooCommerce zip (infra/images/woocommerce-zip): copied in, so setup installs it
+      # from a file instead of downloading it.
+      initContainers:
+        - name: plugin
+          image: {{ . | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["cp", "/plugin/woocommerce.zip", "/plugin-out/woocommerce.zip"]
+          resources: { requests: { cpu: 10m, memory: 16Mi }, limits: { cpu: 200m, memory: 64Mi } }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: plugin, mountPath: /plugin-out }
+      {{- end }}
       containers:
         - name: setup
           image: "{{ .Values.setup.image.repository }}:{{ .Values.setup.image.tag }}"
@@ -75,7 +91,13 @@ spec:
             - { name: html, mountPath: /var/www/html }
             - { name: setup, mountPath: /setup, readOnly: true }
             - { name: tmp, mountPath: /tmp }   # HOME and the WP-CLI cache (plugin downloads)
+            {{- if .Values.woocommerce.pluginImage }}
+            - { name: plugin, mountPath: /plugin, readOnly: true }
+            {{- end }}
       volumes:
+        {{- if .Values.woocommerce.pluginImage }}
+        - { name: plugin, emptyDir: { sizeLimit: 64Mi } }
+        {{- end }}
         - name: html
           persistentVolumeClaim:
             claimName: {{ include "urumi-store.fullname" . }}-wordpress

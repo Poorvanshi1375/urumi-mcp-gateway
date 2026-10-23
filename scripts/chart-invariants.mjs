@@ -26,12 +26,14 @@ const YAML = require('yaml');
 const root = new URL('..', import.meta.url).pathname;
 
 // The values each environment gets on the command line (as in the Makefile and deploy-ec2.sh).
-const IMAGES = ['--set', 'image.tag=check', '--set', 'wooMcp.image.tag=check', '--set', 'shipMcp.image.tag=check'];
+const IMAGES = ['--set', 'image.tag=check', '--set', 'wooMcp.image.tag=check', '--set', 'shipMcp.image.tag=check', '--set', 'provisioner.image.tag=check'];
 const RENDERS = [
   { chart: 'urumi-store', values: 'values-local.yaml', set: [] },
   { chart: 'urumi-store', values: 'values-prod.yaml', set: ['--set', 'store.host=store.203.0.113.10.nip.io', '--set', 'store.homeUrl=https://store.203.0.113.10.nip.io'] },
   { chart: 'urumi-platform', values: 'values-local.yaml', set: IMAGES },
   { chart: 'urumi-platform', values: 'values-prod.yaml', set: [...IMAGES, '--set', 'platform.ingress.host=app.203.0.113.10.nip.io', '--set', 'wooMcp.store.signingBaseUrl=http://store.203.0.113.10.nip.io'] },
+  // A bonus store as the provisioner installs it: its own MCP server in its namespace.
+  { chart: 'urumi-store', values: 'values-local.yaml', set: ['--set', 'mcp.enabled=true', '--set', 'mcp.image.tag=check', '--set', 'store.host=nyc.store.localhost'], label: 'bonus store' },
   // With the provisioner on (hosted servers, bonus stores): its objects and rules are checked too.
   { chart: 'urumi-platform', values: 'values-local.yaml', set: [...IMAGES, '--set', 'provisioner.enabled=true'], label: 'provisioner on' },
 ];

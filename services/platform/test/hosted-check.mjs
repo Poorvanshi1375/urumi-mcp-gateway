@@ -33,7 +33,7 @@ async function waitState(prefix, want, ms) {
   for (;;) { h = await hosted(prefix); if (!h || want.includes(h.state) || Date.now() > end) return h; await sleep(2000); }
 }
 async function removeAll() {
-  for (const p of ['vdodev', 'vdodbad']) { const h = await hosted(p); if (h && h.state !== 'deleting') await api('DELETE', `/api/hosted/${h.id}`); }
+  for (const p of ['vdodev', 'vdodbad', 'vdodstdio']) { const h = await hosted(p); if (h && h.state !== 'deleting') await api('DELETE', `/api/hosted/${h.id}`); }
 }
 
 must(SHIP_IMAGE, 'SHIP_IMAGE not set');
@@ -47,7 +47,15 @@ try {
     const r = await api('POST', '/api/hosted', { prefix: 'vdodev', name: 'Hosted check', image: SHIP_IMAGE, env: { LOG_LEVEL: 'info' }, secretEnv: { API_TOKEN: 'hosted-check-secret' } });
     must(r.status === 200 && r.body.server?.state === 'provisioning', `create -> ${r.status} ${JSON.stringify(r.body).slice(0, 160)}`);
     ev = await waitState('vdodev', ['ready', 'failed'], 120_000);
-    must(ev?.state === 'ready' && ev.server?.status === 'connected' && ev.server.tools > 0, JSON.stringify(ev).slice(0, 300));
+    must(ev?.state === 'ready', JSON.stringify(ev).slice(0, 300));
+    // Ready means one gateway replica has listed its tools (H7); the others follow within seconds.
+    // Wait until every replica (four reads) reports it connected.
+    for (let i = 0; i < 20; i++) {
+      const reads = await Promise.all([1, 2, 3, 4].map(() => hosted('vdodev')));
+      if (reads.every(x => x?.server?.status === 'connected' && x.server.tools > 0)) { ev = reads[0]; break; }
+      await sleep(1000);
+    }
+    must(ev.server?.status === 'connected' && ev.server.tools > 0, `not connected on every replica 20 s after Ready: ${JSON.stringify(ev.server)}`);
     must(!JSON.stringify(await api('GET', '/api/hosted')).includes('hosted-check-secret') && ev.secretEnvKeys.join() === 'API_TOKEN', 'secret env value returned');
     return `ready in ${Math.round((Date.now() - t0) / 1000)} s, ${ev.server.tools} tools, ${ev.image}; secret env shown by name only`;
   });
@@ -99,6 +107,20 @@ try {
     const h = await waitState('vdodbad', ['failed', 'ready'], 260_000);
     must(h?.state === 'failed' && /pods_ready|workload/.test(`${h.step} ${h.error}`) && /ImagePull|ErrImage|pull/i.test(h.error ?? ''), JSON.stringify(h).slice(0, 300));
     return `failed: ${h.error.slice(0, 110)}`;
+  });
+  await check('a stdio server, through the bridge (P12)', async () => {
+    const r = await api('POST', '/api/hosted', { prefix: 'vdodstdio', name: 'Shipping over stdio', image: SHIP_IMAGE, transport: 'stdio', command: ['node', 'src/stdio.ts'] });
+    must(r.status === 200, `create -> ${r.status} ${r.body.error}`);
+    let h = await waitState('vdodstdio', ['ready', 'failed'], 150_000);
+    must(h?.state === 'ready' && h.transport === 'stdio', JSON.stringify(h).slice(0, 240));
+    for (let i = 0; i < 20 && !(h?.server?.tools === 3); i++) { await sleep(1000); h = await hosted('vdodstdio'); }
+    must(h.server?.tools === 3, `tools: ${JSON.stringify(h.server)}`);
+    const call = await mcp('tools/call', { name: 'vdodstdio__quote_shipping', arguments: { pincode: '560001', weight_kg: 2 } });
+    must(!call.result?.isError && /price_inr/.test(call.result?.content?.[0]?.text ?? ''), JSON.stringify(call).slice(0, 200));
+    const bad = await api('POST', '/api/hosted', { prefix: 'vdodx', name: 'x', image: SHIP_IMAGE, transport: 'stdio' });
+    must(bad.status === 400 && /command/.test(bad.body.error), `stdio without a command: ${bad.status} ${bad.body.error}`);
+    await api('DELETE', `/api/hosted/${h.id}`);
+    return `ready with 3 tools from "node src/stdio.ts"; quote_shipping answered through the bridge; stdio without a command refused`;
   });
   await check('delete: tools gone at once, then the namespace and the row', async () => {
     const t0 = Date.now();

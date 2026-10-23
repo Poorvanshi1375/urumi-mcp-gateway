@@ -15,13 +15,15 @@ import http from 'node:http';
 import pg from 'pg';
 import { eq, sql } from 'drizzle-orm';
 import { createDb } from './db/client.ts';
-import { activityEvents, hostedServers } from './db/schema.ts';
+import { activityEvents, hostedServers, stores } from './db/schema.ts';
 import { createCredentialCipher } from './lib/crypto.ts';
 import { checkAllowPrefixes } from './lib/image-ref.ts';
 import { inClusterClient } from './lib/k8s.ts';
 import { hostedSteps, hostedTeardown, lastWarning, type HostedEnv, type HostedRow } from './provision/hosted.ts';
-import { claim, LEASE_RENEW_MS, release, renew, writeIfState } from './provision/rows.ts';
-import { deletePass, provisionPass } from './provision/steps.ts';
+import { claim, LEASE_RENEW_MS, release, renew, writeIfState, type Table } from './provision/rows.ts';
+import { storeNamespace, storeSteps, storeTeardown, type StoreEnv, type StoreRow } from './provision/stores.ts';
+import { createHelm } from './lib/helm.ts';
+import { deletePass, provisionPass, type Step } from './provision/steps.ts';
 import { PROVISION_CHANNEL } from './services/hosted.ts';
 
 const TICK_MS = Number(process.env.PROVISIONER_TICK_MS ?? 10_000);
@@ -45,45 +47,77 @@ const env: HostedEnv = {
   releaseNamespace: releaseNamespace!, releaseName: need('RELEASE_NAME'),
   serviceAccount: need('PROVISIONER_SERVICE_ACCOUNT'), tenantRole: need('TENANT_ROLE'),
   allowedImages: checkAllowPrefixes(need('ALLOWED_IMAGES').split(',').filter(Boolean)),
+  bridgeImage: process.env.BRIDGE_IMAGE || undefined,
 };
 const activity = (action: string, target: string, detail?: Record<string, unknown>) =>
   db.insert(activityEvents).values({ actorEmail: 'provisioner', action, target, detail }).catch(e => log('warn', 'activity write failed', { err: String(e) }));
 
-// One pass over one claimed hosted server, under its lease.
-async function reconcileHosted(id: string) {
-  const [row] = await db.select().from(hostedServers).where(eq(hostedServers.id, id)) as HostedRow[];
+// Bonus stores (multi-store): the same loop, with the store chart installed by Helm.
+const storesOn = process.env.STORES === 'on';
+const storeEnv: StoreEnv | undefined = storesOn ? {
+  ...env, helm: createHelm(), chart: process.env.STORE_CHART ?? '/app/charts/urumi-store',
+  wooMcpImage: { repository: need('WOO_MCP_IMAGE_REPOSITORY'), tag: need('WOO_MCP_IMAGE_TAG') },
+  pluginImage: process.env.WOOCOMMERCE_PLUGIN_IMAGE || null,
+  homeUrlTemplate: need('STORE_HOME_URL_TEMPLATE'), signingUrlTemplate: need('STORE_SIGNING_URL_TEMPLATE'),
+  extraValues: JSON.parse(process.env.STORE_EXTRA_VALUES || '{}'),
+} : undefined;
+
+type Kind = { table: Table; label: string; load: (id: string) => Promise<any>; steps: (row: any) => Step<null>[]; teardown: (row: any) => Step<null>[]; hint?: (row: any) => Promise<string | null> };
+const KINDS: Kind[] = [
+  { table: 'hosted_servers', label: 'hosted server', load: async id => (await db.select().from(hostedServers).where(eq(hostedServers.id, id)))[0],
+    steps: r => hostedSteps(env, r), teardown: r => hostedTeardown(env, r), hint: r => lastWarning(env, r) },
+  ...(storeEnv ? [{ table: 'stores' as Table, label: 'store', load: async (id: string) => (await db.select().from(stores).where(eq(stores.id, id)))[0],
+    steps: (r: StoreRow) => storeSteps(storeEnv, r), teardown: (r: StoreRow) => storeTeardown(storeEnv, r),
+    hint: (r: StoreRow) => lastWarning(env, { prefix: '', id: r.id } as HostedRow, storeNamespace(r.slug)) }] : []),
+];
+
+// One pass over one claimed row, under its lease.
+async function reconcile(kind: Kind, id: string) {
+  const row = await kind.load(id);
   if (!row || row.leaseOwner !== owner) return;
-  const keep = setInterval(() => void renew(db, 'hosted_servers', id, owner).then(ok => { if (!ok) log('warn', 'lease lost', { prefix: row.prefix }); }).catch(() => {}), LEASE_RENEW_MS);
+  const name = row.prefix ?? row.slug;
+  const keep = setInterval(() => void renew(db, kind.table, id, owner).then(ok => { if (!ok) log('warn', 'lease lost', { name }); }).catch(() => {}), LEASE_RENEW_MS);
+  const what = kind.table === 'stores' ? 'store' : 'hosted';
   try {
     const now = new Date();
     const patch = row.state === 'deleting'
-      ? await deletePass(row, hostedTeardown(env, row), null, { now })
-      : await provisionPass(row, hostedSteps(env, row), null, { now, hint: () => lastWarning(env, row) });
+      ? await deletePass(row, kind.teardown(row), null, { now })
+      : await provisionPass(row, kind.steps(row), null, { now, hint: kind.hint ? () => kind.hint!(row) : undefined });
     if (!Object.keys(patch).length) return;
-    if (!(await writeIfState(db, 'hosted_servers', id, owner, row.state, patch))) { log('info', 'superseded (deleted or lease lost)', { prefix: row.prefix }); return; }
-    if (patch.gone) { log('info', 'hosted server removed', { prefix: row.prefix }); await activity('hosted_removed', row.prefix); }
-    else if (patch.state === 'ready') { log('info', 'hosted server ready', { prefix: row.prefix }); await activity('hosted_ready', row.prefix, { image: row.image }); }
-    else if (patch.state === 'failed') { log('warn', 'hosted server failed', { prefix: row.prefix, step: patch.step, error: patch.error }); await activity('hosted_failed', row.prefix, { step: patch.step, error: patch.error }); }
-    else if (patch.error) log('warn', 'hosted step failed, will retry', { prefix: row.prefix, error: patch.error, attempts: patch.attempts });
+    if (!(await writeIfState(db, kind.table, id, owner, row.state, patch))) { log('info', 'superseded (deleted or lease lost)', { name }); return; }
+    if (patch.gone) { log('info', `${kind.label} removed`, { name }); await activity(`${what}_removed`, name); }
+    else if (patch.state === 'ready') { log('info', `${kind.label} ready`, { name }); await activity(`${what}_ready`, name); }
+    else if (patch.state === 'failed') { log('warn', `${kind.label} failed`, { name, step: patch.step, error: patch.error }); await activity(`${what}_failed`, name, { step: patch.step, error: patch.error }); }
+    else if (patch.error) log('warn', `${kind.label} step failed, will retry`, { name, error: patch.error, attempts: patch.attempts });
   } catch (e) {
-    log('error', 'reconcile crashed', { prefix: row.prefix, err: (e as Error).message.slice(0, 300) });
+    log('error', 'reconcile crashed', { name, err: (e as Error).message.slice(0, 300) });
   } finally {
     clearInterval(keep);
-    await release(db, 'hosted_servers', id, owner).catch(() => {});
+    await release(db, kind.table, id, owner).catch(() => {});
   }
 }
 
 let lastTick = 0, ready = false, lastProblem: string | null = null;
+const inFlight = new Map<Table, Set<string>>(KINDS.map(k => [k.table, new Set<string>()]));
 async function tick() {
   try {
     const [r] = (await db.execute(sql`select
       (select count(*) from hosted_servers where state in ('provisioning', 'deleting'))::int as hosted,
       (select count(*) from stores where state in ('provisioning', 'deleting'))::int as stores`)).rows as { hosted: number; stores: number }[];
     if (!(await k8s.get('Namespace', undefined, releaseNamespace!))) throw new Error(`namespace ${releaseNamespace} not found`);
-    if (lastProblem || !ready) log('info', 'provisioner connected', { postgres: 'ok', kubernetes: 'ok', waiting: r });
+    if (lastProblem || !ready) log('info', 'provisioner connected', { postgres: 'ok', kubernetes: 'ok', stores: storesOn, waiting: r });
     ready = true; lastProblem = null;
-    const work = await claim<{ id: string }>(db, 'hosted_servers', owner, PARALLEL);
-    await Promise.all(work.map(w => reconcileHosted(w.id)));
+    // Up to PARALLEL rows of each kind at once, each in the background: a slow step (a Helm install)
+    // never holds up another row, and a free slot is filled on the next tick.
+    for (const kind of KINDS) {
+      const busy = inFlight.get(kind.table)!;
+      if (busy.size >= PARALLEL) continue;
+      const work = await claim<{ id: string }>(db, kind.table, owner, PARALLEL - busy.size);
+      for (const w of work) {
+        busy.add(w.id);
+        void reconcile(kind, w.id).finally(() => { busy.delete(w.id); void loop(); });
+      }
+    }
   } catch (e) {
     const problem = (e as Error).message.slice(0, 300);
     if (problem !== lastProblem) log('warn', 'provisioner tick failed', { err: problem });

@@ -59,17 +59,38 @@ Its tools appear on Servers under its prefix, **pinned** and with its read-only 
 
 **Delete** removes the tools from every client at once (the upstream row first), then the namespace and everything in it, then the row.
 
+**stdio servers.** Most published MCP servers speak stdio, not HTTP. With transport `stdio` and a command (for example `node server.js`), an init container copies `mcp-bridge` (infra/images/mcp-bridge: about 200 lines of Go, a 6 MB static binary) into the pod, and the container runs `/bridge/mcp-bridge -- <command>`. The bridge serves MCP over HTTP on the port with the bearer token, runs the command as its child and relays JSON-RPC over its stdin and stdout, one message per line: it remaps request ids so callers never collide in the child's single session, answers repeated `initialize` requests from the first one, refuses lines over 1 MiB, gives each request 30 s, and restarts the child with a growing delay (its health check fails meanwhile). The server's image only needs the command's runtime; the bridge image is on the same allowlist and checked the same way.
+
 A third-party image will not check the bearer token; the NetworkPolicy is the boundary that matters. The token still protects servers that do check it.
 
 **Checked by `services/platform/test/hosted-check.mjs`** (in `scripts/verify-dod.sh --all`): ready from our ship-mcp image in about 30 s; its tools listed and called, audited; a pod in the platform namespace cannot reach it while the gateway can; it cannot reach Postgres, woo-mcp or the internet and has no token; bad images, reserved or taken prefixes and platform env names are refused with the reason; a member gets 403; an image that cannot be pulled ends `failed` with the cluster's reason; delete removes the tools in under a second, then the namespace and the row.
 
 ## Bonus stores
 
-In progress (steps P8 to P11): each store is the same `urumi-store` chart in `store-<slug>`, with its own MySQL, generated Secret and Ingress host, plus its own woo-mcp registered as a managed upstream (trusted and not pinned: our code, at an address only the provisioner sets).
+An admin opens **Stores**, gives a name (2 to 12 lowercase letters or digits), a title, a currency, a country and a timezone, and gets a complete WooCommerce store in about two minutes, at `http://<name>.<baseHost>` (`<name>.store.localhost:9080` on k3d, `<name>.store.<ip>.nip.io` on the VPS). Several can be created at once.
+
+Each store is the **same `urumi-store` chart** as the default store, installed by the provisioner with Helm (`helm upgrade --install`, values only, nothing secret in them) in its own namespace `store-<name>`:
+
+1. the namespace (Pod Security **restricted**: the whole chart passes it), its role binding, and a ResourceQuota (8 pods, 3 GiB memory limit, 2 volumes, 10 GiB storage, no NodePort or LoadBalancer Services);
+2. the Secret `store-secrets`, made once and kept (MySQL keeps the first password it was given): MySQL root and user passwords, the WordPress admin password, a WooCommerce REST key and secret, and the token for the store's MCP server; generated in the provisioner, never logged, never stored in Postgres except the MCP token, encrypted on the server row;
+3. the chart: MySQL with its volume, WordPress with its volume, the setup Job (WordPress, WooCommerce from the pre-baked image, the REST key on a shop-manager user, sample products), the Ingress host, NetworkPolicies, and the store's **own woo-mcp** (`mcp.enabled`), which talks to its WordPress inside the namespace and accepts only the gateway; a release stuck after a crash (`pending-*`) or failed is removed and installed again;
+4. it waits for the setup Job (a failed Job fails the store with its message), then for the MCP server;
+5. registers the server `<name>` (bearer token), trusted and not pinned (our own woo-mcp, at an address only the provisioner sets), so members get its read tools like the default store's;
+6. is Ready when the gateway has listed its tools.
+
+Its tools are `<name>__list_orders` and so on; results carry `store: { title, url }`, and the chat agent is told that several stores may be connected and never to mix their figures. With many tools (each store adds six), chat switches to `gateway__search_tools` and `gateway__call_tool`; a write sent through `call_tool` is still judged, confirmed and audited as the real tool.
+
+**Delete** needs the store's name typed (it destroys the store's data). The tools go at once, in the request itself; then the namespace, with the Helm release, the Secret and both volumes, and the provisioner waits until the volumes are released before removing the row. A Delete that arrives during an install stops it.
+
+The admin password stays in the cluster: the Stores page shows the `kubectl` command that reads it, never the password (the gateway faces the internet and never handles store credentials).
+
+**Checked by `services/platform/test/stores-check.mjs`** (in `scripts/verify-dod.sh --all`): two stores created at the same time are both Ready (about four minutes in parallel on a laptop) even with the provisioner restarted mid-way, with no duplicate rows; each storefront serves its own store; each store's MCP server answers as that store; a product created in one is not listed by the other; one store's MCP server reaches its own WordPress but not the other store's WordPress or MySQL, nor Postgres, and their secrets differ (compared by hash); the limit refuses one store too many; a store deleted during its install is removed; deleting a store removes its tools in under 100 ms, then its namespace, volumes and row.
 
 ## Limits
 
 - `provisioner.hosted.maxServers` (5) hosted servers; each must be ready within `timeoutMinutes` (3).
+- `provisioner.stores.max` bonus stores (3 on k3d, 2 on the 8 GiB VPS: each takes about 0.6 GiB of requests); each must be ready within `timeoutMinutes` (10).
+- Bonus stores are served over plain http (Let's Encrypt per store on nip.io is possible but rate-limited; not enabled).
 - One provisioner replica (leases would make two safe).
-- Only HTTP servers; stdio servers would need a bridge (optional step P12).
+- stdio servers run through the bridge, one session for all callers: servers that keep per-client state are not separated per caller.
 - The API server's address is read at install time; if the node's address changes, run `helm upgrade` again.

@@ -53,6 +53,7 @@ function HostedCard({ h }: { h: Hosted }) {
       </div>
       <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-[13px]">
         <dt className="text-muted">Image</dt><dd className="font-mono">{h.image}</dd>
+        {h.transport === 'stdio' && <><dt className="text-muted">Command</dt><dd className="font-mono">{(h.command ?? []).join(' ')} <span className="text-muted">(stdio, through the bridge)</span></dd></>}
         <dt className="text-muted">Namespace</dt><dd className="font-mono">{h.namespace}</dd>
         <dt className="text-muted">Address</dt><dd className="font-mono break-all">{h.url}</dd>
         <dt className="text-muted">Size</dt><dd>{h.size}{h.needsInternet ? ' · internet allowed' : ' · no internet'}</dd>
@@ -86,8 +87,10 @@ function AddHosted({ allowed, onClose }: { allowed: string[]; onClose: () => voi
   const [prefix, setPrefix] = useState(''), [name, setName] = useState(''), [image, setImage] = useState('');
   const [port, setPort] = useState('8080'), [path, setPath] = useState('/mcp'), [size, setSize] = useState<'small' | 'medium' | 'large'>('small');
   const [internet, setInternet] = useState(false), [env, setEnv] = useState<EnvRow[]>([]), [secretEnv, setSecretEnv] = useState<EnvRow[]>([]);
+  const [transport, setTransport] = useState<'http' | 'stdio'>('http'), [command, setCommand] = useState('');
   const toMap = (rows: EnvRow[]) => Object.fromEntries(rows.filter(r => r.k.trim()).map(r => [r.k.trim(), r.v]));
-  const save = useApiMutation(() => api('POST', '/api/hosted', { prefix, name, image, port: Number(port), path, size, needsInternet: internet, env: toMap(env), secretEnv: toMap(secretEnv) }), [['hosted']]);
+  const save = useApiMutation(() => api('POST', '/api/hosted', { prefix, name, image, port: Number(port), path, size, needsInternet: internet, env: toMap(env), secretEnv: toMap(secretEnv),
+    transport, ...(transport === 'stdio' ? { command: command.trim().split(/\s+/).filter(Boolean) } : {}) }), [['hosted']]);
   return (
     <Drawer title="Host an MCP server" onClose={onClose} footer={<>
       <Button variant="outline" onClick={onClose}>Cancel</Button>
@@ -100,6 +103,14 @@ function AddHosted({ allowed, onClose }: { allowed: string[]; onClose: () => voi
       <Field label="Image" htmlFor="h-image" help={<>With a version tag or digest (not :latest). Allowed: <span className="font-mono">{allowed.join(', ') || 'none'}</span></>}>
         <input id="h-image" className="input font-mono text-[13px]" value={image} onChange={e => setImage(e.target.value)} placeholder="urumi-ship-mcp:1.0.0" />
       </Field>
+      <Field label="Transport" help={transport === 'stdio' ? 'The image runs your command; the platform serves it over HTTP with its own bridge (the image needs the command\'s runtime).' : 'The image itself serves MCP over HTTP (Streamable HTTP).'}>
+        <select className="input" value={transport} onChange={e => setTransport(e.target.value as 'http' | 'stdio')}><option value="http">HTTP (Streamable HTTP)</option><option value="stdio">stdio (a command)</option></select>
+      </Field>
+      {transport === 'stdio' && (
+        <Field label="Command" htmlFor="h-cmd" help="Words separated by spaces, e.g. node src/stdio.ts">
+          <input id="h-cmd" className="input font-mono" value={command} onChange={e => setCommand(e.target.value)} placeholder="node server.js" />
+        </Field>
+      )}
       <div className="grid grid-cols-2 gap-3">
         <Field label="Port" htmlFor="h-port"><input id="h-port" className="input font-mono" inputMode="numeric" value={port} onChange={e => setPort(e.target.value.replace(/\D/g, ''))} /></Field>
         <Field label="Path" htmlFor="h-path"><input id="h-path" className="input font-mono" value={path} onChange={e => setPath(e.target.value)} /></Field>

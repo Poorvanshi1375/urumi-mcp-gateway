@@ -143,6 +143,13 @@ function capBody(res: UndiciResponse, max: number): UndiciResponse {
   return new UndiciResponse(counted as any, { status: res.status, statusText: res.statusText, headers: res.headers });
 }
 
+// Failures before the request is sent: the connect timed out or the TLS handshake failed. One retry
+// is safe even for a write, since the server never saw it (seen in the cluster: about 1 connect in 25
+// to a public server dropped while the host saw none). Not a reset or a timeout after connecting:
+// the request may have arrived.
+const BEFORE_SEND = new Set(['UND_ERR_CONNECT_TIMEOUT', 'ERR_SSL_WRONG_VERSION_NUMBER', 'EAI_AGAIN']);
+export const failedBeforeSend = (e: any) => BEFORE_SEND.has(e?.cause?.code ?? e?.code);
+
 export function createGuardedFetch(policy: SsrfPolicy, opts: { maxResponseBytes?: number } = {}): typeof fetch {
   const lookup: net.LookupFunction = (hostname, options, callback) => {
     dns.lookup(hostname, { ...options, all: true }, (err, addrs) => {
@@ -170,7 +177,10 @@ export function createGuardedFetch(policy: SsrfPolicy, opts: { maxResponseBytes?
     const u = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
     const host = bare(u.hostname);
     if (net.isIP(host)) checkAddress(host, host, policy);
-    const res = await undiciFetch(input, { ...init, redirect: init?.redirect === 'error' ? 'error' : 'manual', dispatcher: agent });
+    const go = () => undiciFetch(input, { ...init, redirect: init?.redirect === 'error' ? 'error' : 'manual', dispatcher: agent });
+    // A stream body cannot be sent twice; the MCP SDK sends strings.
+    const resendable = init?.body == null || typeof init.body === 'string';
+    const res = await go().catch(e => { if (resendable && !init?.signal?.aborted && failedBeforeSend(e)) return go(); throw e; });
     const post = String(init?.method ?? (typeof input === 'object' && 'method' in input ? input.method : 'GET')).toUpperCase() === 'POST';
     return opts.maxResponseBytes && post ? capBody(res, opts.maxResponseBytes) : res;
   }) as unknown as typeof fetch;
