@@ -32,7 +32,7 @@ const router = createBrowserRouter([
       { path: '/connect', element: <Connect /> },
       { path: '/users', element: <RequireAdmin><Users /></RequireAdmin> },
       { path: '/hosted', element: <RequireAdmin><HostedServers /></RequireAdmin> },
-      { path: '/stores', element: <RequireAdmin><Stores /></RequireAdmin> },
+      { path: '/stores', element: <Stores /> },
       { path: '*', element: <Navigate to="/chat" replace /> },
     ],
   },

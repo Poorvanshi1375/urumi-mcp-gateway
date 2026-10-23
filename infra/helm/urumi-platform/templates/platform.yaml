@@ -150,6 +150,7 @@ spec:
             - { name: HOSTED_TIMEOUT_MINUTES, value: {{ .Values.provisioner.hosted.timeoutMinutes | quote }} }
             - { name: STORES, value: {{ ternary "on" "off" .Values.provisioner.stores.enabled | quote }} }
             - { name: STORE_MAX, value: {{ .Values.provisioner.stores.max | quote }} }
+            - { name: STORE_MAX_PER_USER, value: {{ .Values.provisioner.stores.maxPerUser | quote }} }
             - { name: STORE_BASE_HOST, value: {{ .Values.provisioner.stores.baseHost | quote }} }
             - { name: STORE_TIMEOUT_MINUTES, value: {{ .Values.provisioner.stores.timeoutMinutes | quote }} }
             - { name: STORE_HOME_URL_TEMPLATE, value: {{ .Values.provisioner.stores.homeUrlTemplate | quote }} }

@@ -1,10 +1,13 @@
 // Leases and compare-and-set writes for the provisioner's rows (H1, H2), against the real Postgres.
 // Runs inside a gateway pod, as the app role, by piping this file in (the image has /app/src, not
 // test/): kubectl exec -i deploy/platform -c platform -- node --input-type=module < this file
-// Uses its own hosted_servers rows (prefix vdodl*), removed at the end.
+// Uses its own hosted_servers rows (prefix vdodl*) and, for the per-user store limit, a user
+// vdod-limit@example.com with two failed store rows (vdodls*; the provisioner never claims failed rows),
+// all removed at the end.
 import { sql } from 'drizzle-orm';   // resolved from the pod's working directory, /app
 import { createDb } from '/app/src/db/client.ts';
 import { claim, release, renew, requestDelete, requestRetry, writeIfState } from '/app/src/provision/rows.ts';
+import { createStore } from '/app/src/services/stores.ts';
 
 const { pool, db } = createDb();
 let failed = 0;
@@ -89,8 +92,30 @@ try {
     must(after.state === 'provisioning' && after.attempts === 0 && after.error === null && new Date(after.deadline_at) > new Date(), JSON.stringify(after).slice(0, 160));
     return 'gone -> row deleted; retry refused while provisioning, accepted when failed (fresh deadline)';
   });
+
+  await check('P14: a user\'s own stores are limited (maxPerUser)', async () => {
+    const [u] = await q(sql`insert into users (email, role) values ('vdod-limit@example.com', 'member') returning id`);
+    const by = { id: u.id, email: 'vdod-limit@example.com' };
+    const limits = { max: 1000, maxPerUser: 2, baseHost: 'x.invalid', timeoutMs: 60_000, homeUrlTemplate: 'http://{host}' };
+    const attempt = slug => createStore(db, { slug, title: slug }, by, limits).then(() => 'created', e => `${e.status} ${e.message}`);
+    const add1 = (slug, state) => db.execute(sql`insert into stores (slug, title, host, admin_email, currency, country, timezone, created_by, state)
+      values (${slug}, ${slug}, ${`${slug}.x.invalid`}, 'vdod-limit@example.com', 'INR', 'IN:KA', 'Asia/Kolkata', ${u.id}, ${state})`);
+    await add1('vdodlsa', 'failed'); await add1('vdodlsb', 'failed');
+    const third = await attempt('vdodlsc');
+    must(third === '409 limit reached: at most 2 stores per user', `third store: ${third}`);
+    // A store being deleted no longer counts; a user's slots are theirs alone (checked via the limit 1).
+    await db.execute(sql`update stores set state = 'deleting' where slug = 'vdodlsb'`);
+    const counted = await q(sql`select count(*)::int as n from stores where created_by = ${u.id} and state <> 'deleting'`);
+    const tight = await createStore(db, { slug: 'vdodlsd', title: 'x' }, by, { ...limits, maxPerUser: 1 }).then(() => 'created', e => `${e.status} ${e.message}`);
+    must(counted[0].n === 1 && tight === '409 limit reached: at most 1 store per user', `counted ${counted[0].n}; with limit 1: ${tight}`);
+    const total = await createStore(db, { slug: 'vdodlse', title: 'x' }, by, { ...limits, max: 0 }).then(() => 'created', e => `${e.status} ${e.message}`);
+    must(total === '409 limit reached: at most 0 stores', `the overall limit: ${total}`);
+    return 'third store refused (409 at most 2 per user); a deleting store does not count; the overall limit still applies first';
+  });
 } finally {
   await db.execute(sql`delete from hosted_servers where prefix like 'vdodl%'`).catch(() => {});
+  await db.execute(sql`delete from stores where slug like 'vdodls%'`).catch(() => {});
+  await db.execute(sql`delete from users where email = 'vdod-limit@example.com'`).catch(() => {});
   await pool.end();
 }
 console.log(failed ? `PROVISION ROWS CHECK FAILED (${failed})` : 'PROVISION ROWS CHECK PASSED');

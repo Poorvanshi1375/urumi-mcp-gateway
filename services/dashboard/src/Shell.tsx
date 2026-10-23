@@ -15,7 +15,7 @@ export const Mark = ({ size = 28 }: { size?: number }) => (
 const sections = [
   { label: 'Workspace', items: [
     { to: '/chat', label: 'Chat', icon: MessageSquare },
-    { to: '/stores', label: 'Stores', icon: Store, admin: true, feature: 'stores' as const },
+    { to: '/stores', label: 'Stores', icon: Store, feature: 'stores' as const },
   ] },
   { label: 'Gateway', items: [
     { to: '/servers', label: 'Servers', icon: Server },

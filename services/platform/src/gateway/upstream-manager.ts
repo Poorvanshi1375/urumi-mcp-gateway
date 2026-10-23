@@ -480,7 +480,16 @@ export class UpstreamManager {
       const pending = pinning
         ? await pinning.observe(s.row.id, listed.tools).catch(e => { this.log.warn({ upstream: s.row.prefix, err: describeError(e) }, 'tool pinning check failed'); return s.pending; })
         : new Set<string>();
-      if (pending.size && [...pending].some(t => !s.pending.has(t))) this.log.warn({ upstream: s.row.prefix, tools: [...pending] }, 'tools changed since approval; hidden until an admin approves them');
+      const newlyPending = [...pending].some(t => !s.pending.has(t));
+      if (newlyPending) this.log.warn({ upstream: s.row.prefix, tools: [...pending] }, 'tools changed since approval; hidden until an admin approves them');
+      if (s.status === 'connected' && (newlyPending || [...s.pending].some(t => !pending.has(t)))) {
+        // Each replica only learns of a change from its own tools/list: tell the others to list now,
+        // so none keeps serving a changed tool, or hiding one that went back to its approved version,
+        // until its next health check (seen with 4 replicas on the VPS). A replica that finds the same
+        // change sends this once more; then the sets agree and it settles.
+        const prefix = s.row.prefix;
+        void Promise.resolve().then(() => this.db.execute(sql`select pg_notify(${REGISTRY_CHANNEL}, ${`recheck:${prefix}`})`)).catch(() => {});
+      }
       if (s.lastOutage && !s.lastOutage.to) s.lastOutage.to = new Date();
       // Compile once per tool-list change, not on every health check.
       if (this.opts.validateArguments && (!s.validators || JSON.stringify(listed.tools) !== JSON.stringify(s.tools))) Object.assign(s, compileValidators(listed.tools));
@@ -532,6 +541,15 @@ export class UpstreamManager {
     if (!this.opts.pinning) return;
     for (const s of this.states.values()) s.pending = this.pinningFor(s.row)?.pending(s.row.id, s.tools) ?? new Set();
     this.emitIfChanged();
+  }
+
+  // Ask one server for its tools now and wait for the answer: an approval must pin what the server
+  // serves now, not this replica's copy from its last health check.
+  async relist(prefix: string) {
+    const s = this.states.get(prefix);
+    if (!s?.row.enabled) return;
+    await s.inFlight?.catch(() => {});
+    await this.checkOnce(s);
   }
 
   // The current definition of one upstream tool (for approval).

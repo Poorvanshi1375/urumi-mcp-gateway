@@ -11,7 +11,7 @@ import { CALL_TOOL, newRequestId, SEARCH_TOOL, searchModeTools, unwrapCall, type
 import type { Principal } from '../gateway/auth.ts';
 import { ALL_TOOLS, asksInChat, listRules, setConfirmRule, setMemberRule, type Permissions } from '../services/permissions.ts';
 import { createHosted, deleteHosted, findHosted, HostedError, listHosted, publicHosted, retryHosted, SIZES, tenantNameConflict, type HostedLimits } from '../services/hosted.ts';
-import { COUNTRIES, CURRENCIES, createStore, deleteStore, findStore, listStores, publicStore, retryStore, TIMEZONES, type StoreLimits } from '../services/stores.ts';
+import { COUNTRIES, CURRENCIES, createStore, deleteStore, findStore, listStores, mayManageStore, publicStore, retryStore, TIMEZONES, type StoreLimits } from '../services/stores.ts';
 import { createProposal, decide, declineWaiting, listWaiting, ProposalError, publicProposal, setProposalAudit, summarize } from '../services/proposals.ts';
 import { runAgent, summarizeConfirmed, type AgentEvent, type ChatConfig, type ToolExec } from '../chat/agent.ts';
 import type { CredentialCipher } from '../lib/crypto.ts';
@@ -22,7 +22,7 @@ import { listActivity, recordActivity, type Action } from '../services/activity.
 import { counters } from '../lib/metrics.ts';
 import type { SharedRateLimiter } from '../lib/ratelimit.ts';
 import { assertUrlAllowed, SsrfError, type SsrfPolicy } from '../lib/ssrf.ts';
-import { definitionOf, stable, type Pinning } from '../services/pins.ts';
+import { definitionOf, stable, toolHash, type Pinning } from '../services/pins.ts';
 import { acceptInvite, createInvite, deleteInvite, findOpenInvite, listInvites } from '../services/invites.ts';
 import { createApiKey, listApiKeys, revokeApiKey } from '../services/keys.ts';
 import { issueCode, listGrants, revokeGrantOf, revokeUserGrants } from '../services/oauth.ts';
@@ -311,6 +311,8 @@ export function registerApi(app: FastifyInstance, { db, cipher, manager, core, p
   // ---- MCP servers (G1, G7). Everyone may view status and tools; only admins change them.
   // Members see each server's status and tools but not its URL: only admins need to know where
   // an upstream lives.
+  // The hash of a tool's current definition, as the server serves it (what an approval would pin).
+  const hashOf = (prefix: string, tool: string) => { const c = manager.currentTool(prefix, tool); return c ? toolHash(c.tool) : undefined; };
   async function serversView(isAdmin = true) {
     const live = new Map(manager.snapshot().map(s => [s.prefix, s]));
     return (await listUpstreams(db)).map(u => {
@@ -320,7 +322,7 @@ export function registerApi(app: FastifyInstance, { db, cipher, manager, core, p
         tools: (s?.tools ?? []).map(t => ({ ...t, memberAllowed: perms.allows('member', u.prefix, t.name, manager.readOnly(u.prefix, t)),
           chatConfirm: perms.confirmMode(u.prefix, t.name), asksInChat: asksInChat(perms.confirmMode(u.prefix, t.name), manager.readOnly(u.prefix, t)),
           // For a tool waiting for re-approval, admins get the approved version to diff against.
-          ...(t.pending && isAdmin ? { approved: pinning.approved(u.id, t.name) } : {}) })) };
+          ...(t.pending && isAdmin ? { approved: pinning.approved(u.id, t.name), hash: hashOf(u.prefix, t.name) } : {}) })) };
     });
   }
   app.get('/api/servers', async req => { const { user } = await me(req); return { servers: await serversView(user.role === 'admin') }; });
@@ -405,41 +407,47 @@ export function registerApi(app: FastifyInstance, { db, cipher, manager, core, p
     return { ok: true };
   });
 
-  // Bonus stores (multi-store). Admins only; 404 unless the provisioner and stores are on.
+  // Bonus stores (multi-store). Anyone may list them and ask for their own (up to maxPerUser); the
+  // creator and admins may retry or delete one. 404 unless the provisioner and stores are on.
   const storesOn = () => { if (!features.provisioner || !stores.enabled) throw new HttpError(404, 'stores are off (provisioner.enabled, provisioner.stores.enabled)'); };
   app.get('/api/stores', async req => {
-    storesOn(); await admin(req);
+    storesOn(); const { user } = await me(req);
     const live = new Map(manager.snapshot().map(s => [s.prefix, s]));
-    return { stores: (await listStores(db)).map(s => ({ ...publicStore(s, stores), server: live.has(s.slug) ? { status: live.get(s.slug)!.status, tools: live.get(s.slug)!.tools.length } : null })),
-      max: stores.max, baseHost: stores.baseHost, currencies: CURRENCIES, countries: COUNTRIES, timezones: TIMEZONES };
+    return { stores: (await listStores(db)).map(s => ({ ...publicStore(s, stores, user), server: live.has(s.slug) ? { status: live.get(s.slug)!.status, tools: live.get(s.slug)!.tools.length } : null })),
+      max: stores.max, maxPerUser: stores.maxPerUser, baseHost: stores.baseHost, currencies: CURRENCIES, countries: COUNTRIES, timezones: TIMEZONES };
   });
   app.post('/api/stores', async req => {
     storesOn();
-    const { user } = await admin(req);
+    const { user } = await me(req);
     const body = z.object({ slug: z.string().trim(), title: z.string().trim().min(1).max(80), currency: z.string().optional(), country: z.string().optional(),
       timezone: z.string().optional(), adminEmail: email.optional() }).parse(req.body);
     const row = await createStore(db, body, { id: user.id, email: user.email }, stores);
     await activity(req, user, 'store_requested', row.slug, { title: row.title, host: row.host, currency: row.currency });
-    return { store: publicStore(row, stores) };
+    return { store: publicStore(row, stores, user) };
   });
+  // The creator or an admin; 404 for a store that does not exist, 403 for someone else's.
+  async function ownStore(req: FastifyRequest) {
+    const { user } = await me(req);
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    const row = await findStore(db, id);
+    if (!row) throw new HttpError(404, 'no such store');
+    if (!mayManageStore(row, user)) throw new HttpError(403, 'only its creator or an admin can do this');
+    return { user, row };
+  }
   app.post('/api/stores/:id/retry', async req => {
     storesOn();
-    const { user } = await admin(req);
-    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
-    if (!(await retryStore(db, id, stores.timeoutMs))) throw new HttpError(409, 'only a failed store can be retried');
-    const row = await findStore(db, id);
-    await activity(req, user, 'store_requested', row?.slug ?? id, { retry: true });
-    return { store: row && publicStore(row, stores) };
+    const { user, row: before } = await ownStore(req);
+    if (!(await retryStore(db, before.id, stores.timeoutMs))) throw new HttpError(409, 'only a failed store can be retried');
+    const row = await findStore(db, before.id);
+    await activity(req, user, 'store_requested', before.slug, { retry: true });
+    return { store: row && publicStore(row, stores, user) };
   });
   // Deleting a store destroys its data: the request must name it (?confirm=<slug>).
   app.delete('/api/stores/:id', async req => {
     storesOn();
-    const { user } = await admin(req);
-    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
-    const row = await findStore(db, id);
-    if (!row) throw new HttpError(404, 'no such store');
+    const { user, row } = await ownStore(req);
     if ((req.query as Record<string, string> | undefined)?.confirm !== row.slug) throw new HttpError(400, `type the store's name to confirm: ?confirm=${row.slug}`);
-    if (!(await deleteStore(db, id))) throw new HttpError(409, 'already being deleted');
+    if (!(await deleteStore(db, row.id))) throw new HttpError(409, 'already being deleted');
     await activity(req, user, 'store_delete_requested', row.slug);
     return { ok: true };
   });
@@ -451,8 +459,13 @@ export function registerApi(app: FastifyInstance, { db, cipher, manager, core, p
     const { user } = await admin(req);
     if (!pinning.enabled) throw new HttpError(409, 'tool pinning is not enabled (platform.features.toolPinning)');
     const { prefix, tool } = z.object({ prefix: z.string(), tool: z.string().min(1).max(200) }).parse(req.params);
+    // hash: the version the admin reviewed (the dashboard sends it). The server is asked again first,
+    // so the pin is what it serves now; if that is not what was reviewed, nothing is approved.
+    const { hash } = z.object({ hash: z.string().regex(/^[0-9a-f]{64}$/).optional() }).parse(req.body ?? {});
+    await manager.relist(prefix);
     const current = manager.currentTool(prefix, tool);
     if (!current) throw new HttpError(404, `server ${prefix} has no tool ${tool} right now`);
+    if (hash && toolHash(current.tool) !== hash) throw new HttpError(409, `${tool} changed again since you looked; review the new version`);
     const before = pinning.approved(current.upstream.id, tool);
     await pinning.approve(current.upstream.id, current.tool, user.id);
     manager.reapplyPins();

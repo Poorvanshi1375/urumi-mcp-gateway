@@ -70,7 +70,7 @@ cleanup() {
       delete from upstreams where prefix in ('shipcopy', 'shippin', 'vdodmgd', 'vdodplant');
       delete from hosted_servers where prefix like 'vdodl%';
       update hosted_servers set state = 'deleting', next_attempt_at = null where prefix in ('vdodev', 'vdodbad', 'vdodevil', 'vdodstdio') and state <> 'deleting';
-      update stores set state = 'deleting', next_attempt_at = null where slug in ('vdodaa', 'vdodbb', 'vdodcc', 'vdoddd') and state <> 'deleting';   -- stores-check's   -- hosted-check's, if it stopped early   -- test registrations, if a suite stopped early
+      update stores set state = 'deleting', next_attempt_at = null where slug in ('vdodaa', 'vdodbb', 'vdodcc', 'vdoddd', 'vdodmm') and state <> 'deleting';   -- stores-check's   -- hosted-check's, if it stopped early   -- test registrations, if a suite stopped early
       delete from oauth_clients where name like 'oauth-check%';         -- and oauth-check's clients (their grants go with them)
       commit;" && echo "temporary users, their keys and audit rows removed"
     if [ $QUICK = 0 ] || [ $ALL = 1 ]; then
@@ -350,7 +350,7 @@ if [ $ALL = 1 ]; then
     # Bonus stores: two at once, isolated, the limit, delete mid-install, a provisioner restart.
     if [ "$(kubectl get deploy -n "$NS" platform -o jsonpath='{.spec.template.spec.containers[?(@.name=="platform")].env[?(@.name=="STORES")].value}')" = on ]; then
       GW_HOSTPORT=${GW_URL#*://}; GW_HOSTPORT=${GW_HOSTPORT%%/*}; [[ $GW_HOSTPORT == *:* ]] || GW_HOSTPORT="$GW_HOSTPORT:80"
-      suite "stores-check (bonus stores: in parallel, isolated, limited, removed cleanly)" env -C services/platform/test GW_URL="$GW_URL" NS="$NS" \
+      suite "stores-check (bonus stores: in parallel, isolated, limited, removed cleanly)" env -C services/platform/test GW_URL="$GW_URL" NS="$NS" KEY_MEMBER="$(key_for "$MEMBER_EMAIL" vdod-stores-m1)" KEY_MEMBER2="$(key_for "$MEMBER2_EMAIL" vdod-stores-m2)" \
         KEY_ADMIN="$(key_for "$ADMIN_EMAIL" vdod-stores)" STORE_CONNECT="${GW_HOSTPORT/localhost/127.0.0.1}" \
         STORE_MAX="$(kubectl get deploy -n "$NS" platform -o jsonpath='{.spec.template.spec.containers[?(@.name=="platform")].env[?(@.name=="STORE_MAX")].value}')" node stores-check.mjs
     else

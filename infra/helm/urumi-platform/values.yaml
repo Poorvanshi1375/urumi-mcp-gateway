@@ -210,6 +210,7 @@ provisioner:
   stores:
     enabled: true
     max: 3
+    maxPerUser: 2            # each user's own stores (the brief's per-user maximum); max still caps the total
     timeoutMinutes: 10
     baseHost: store.localhost
     homeUrlTemplate: "http://{host}"       # the URL browsers use ({host} = <slug>.<baseHost>)

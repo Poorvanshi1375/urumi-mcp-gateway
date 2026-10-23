@@ -86,6 +86,7 @@ export function loadConfig() {
     stores: {
       enabled: process.env.STORES === 'on',
       max: int('STORE_MAX', 3),
+      maxPerUser: int('STORE_MAX_PER_USER', 2),   // the brief's "maximum number of stores per user"
       baseHost: process.env.STORE_BASE_HOST ?? 'store.localhost',
       timeoutMs: int('STORE_TIMEOUT_MINUTES', 10) * 60_000,
       homeUrlTemplate: process.env.STORE_HOME_URL_TEMPLATE ?? 'http://{host}',

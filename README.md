@@ -174,10 +174,16 @@ The script runs from the laptop, over SSH, and is safe to re-run:
 5. installs cert-manager v1.21.2 and a Let's Encrypt ClusterIssuer (HTTP-01 through Traefik);
 6. installs the store and platform charts with `values-prod.yaml` and the host names below.
 
-**A node installed before Secrets encryption was added** (the flag only applies to a new install): turn it on once, on the node. It causes about 30 seconds of API downtime while k3s restarts; the sites keep running.
+**A node installed before Secrets encryption was added** (the flag only applies to a new install): turn it on once, on the node, with k3s's key rotation. On our VPS (k3s v1.35.5) `secrets-encrypt enable` failed and left an "identity" (unencrypted) configuration, which k3s restores from its datastore at every start; these steps worked. Each restart is about 30 seconds without the API and ingress.
 ```bash
-sudo k3s secrets-encrypt enable && sudo systemctl restart k3s
-sudo k3s secrets-encrypt reencrypt && sudo k3s secrets-encrypt status   # "Encryption Status: Enabled"
+echo "secrets-encryption: true" | sudo tee -a /etc/rancher/k3s/config.yaml
+sudo systemctl restart k3s; sleep 40
+sudo k3s secrets-encrypt prepare                       # adds an AES-CBC key; status: Enabled, stage prepare
+sudo systemctl restart k3s; sleep 40
+sudo k3s secrets-encrypt rotate
+sudo systemctl restart k3s; sleep 40
+sudo k3s secrets-encrypt reencrypt; sleep 30
+sudo k3s secrets-encrypt status                        # Enabled, reencrypt_finished, all hashes match
 ```
 
 URLs: `https://store.<ip>.nip.io/shop/`, `https://app.<ip>.nip.io/` and `https://app.<ip>.nip.io/mcp`. nip.io resolves a name to the IP inside it, so no DNS setup is needed; with a real domain, set the hosts instead.
@@ -227,7 +233,7 @@ node scripts/values-diff.mjs        # every field that differs between values-lo
 (cd services/platform && node test/unit-check.mjs)
 ```
 
-`scripts/verify-dod.sh` runs against the live cluster and checks the definition of done end to end: storefront and WooCommerce REST; PVCs, probes, limits and security contexts on every container; NetworkPolicies (pods without the gateway's labels cannot reach the MCP servers, databases, WordPress or `/metrics`; the MCP servers and the gateway cannot reach anything but what they need, and no pod holds a Kubernetes API token); keys rejected when missing, invalid or revoked; every enabled server's tools listed with namespaced names; restricted tools hidden and denied; an orders question and a two-server task; disabling a server; killing an upstream pod and stopping it entirely; two-replica behaviour and rate limits; the audit and activity logs. It uses temporary users and removes them and their data afterwards, so it can run on a demo system. Latest result on k3d: `make verify-all` 72 passed, 0 failed, 0 skipped (the provisioner's fence: `rbac-check` 49 of 49; `hosted-check` 7 of 7, including a stdio server; `stores-check` 8 of 8; `evil-check` 5 of 5; `credential-isolation-check`, pinning, OAuth, scaling, network and the chat checks, including the fallback model). Earlier `--all` runs failed now and then on a dropped connect to an outside service (about 1 in 25 from the cluster); a request that never reached the server is now tried once more. The VPS result (27 passed, 0 failed, over HTTPS) is from the previous version.
+`scripts/verify-dod.sh` runs against the live cluster and checks the definition of done end to end: storefront and WooCommerce REST; PVCs, probes, limits and security contexts on every container; NetworkPolicies (pods without the gateway's labels cannot reach the MCP servers, databases, WordPress or `/metrics`; the MCP servers and the gateway cannot reach anything but what they need, and no pod holds a Kubernetes API token); keys rejected when missing, invalid or revoked; every enabled server's tools listed with namespaced names; restricted tools hidden and denied; an orders question and a two-server task; disabling a server; killing an upstream pod and stopping it entirely; two-replica behaviour and rate limits; the audit and activity logs. It uses temporary users and removes them and their data afterwards, so it can run on a demo system. Latest result on k3d: `make verify-all` 72 passed, 0 failed, 0 skipped (the provisioner's fence: `rbac-check` 49 of 49; `hosted-check` 7 of 7, including a stdio server; `stores-check` 11 of 11, including chat comparing two stores' orders; `evil-check` 5 of 5; `credential-isolation-check`, pinning, OAuth, scaling, network and the chat checks, including the fallback model). Earlier `--all` runs failed now and then on a dropped connect to an outside service (about 1 in 25 from the cluster); a request that never reached the server is now tried once more. The VPS result (27 passed, 0 failed, over HTTPS) is from the previous version.
 
 ## Stand-out items and where to find them
 
@@ -252,7 +258,7 @@ Also built, beyond the list:
 | LLM fallback | Chat moves to a second provider (Groq) when Gemini is down, rate-limited or out of quota, only before any tool has run, so a write never runs twice | `src/chat/providers.ts` |
 | Append-only audit | The gateway's database role can add and complete audit rows but cannot delete or rewrite them; migrations run as the owner | `src/db/migrate.ts` |
 
-**Bonus: multi-store.** Admins create and delete stores on the **Stores** page. Each is the same `urumi-store` chart in its own namespace `store-<name>` (its own MySQL and volumes, a generated Secret, its own address `<name>.store.<base>`), with its own MCP server registered as `<name>`, so chat and every MCP client reach it as `<name>__list_orders` and so on; status shows Provisioning with the current step, Ready or Failed with the reason, and several are set up in parallel. Delete removes its tools at once, then everything it had. Details and checks: [docs/provisioner.md](docs/provisioner.md#bonus-stores) (`test/stores-check.mjs`).
+**Bonus: multi-store.** Any user creates stores on the **Stores** page, up to `provisioner.stores.maxPerUser` (2) of their own and `max` in all; they delete their own, admins any. Each is the same `urumi-store` chart in its own namespace `store-<name>` (its own MySQL and volumes, a generated Secret, its own address `<name>.store.<base>`), with its own MCP server registered as `<name>`, so chat and every MCP client reach it as `<name>__list_orders` and so on; status shows Provisioning with the current step, Ready or Failed with the reason, and several are set up in parallel. Delete removes its tools at once, then everything it had. Details and checks: [docs/provisioner.md](docs/provisioner.md#bonus-stores) (`test/stores-check.mjs`).
 
 ## Repository layout
 

@@ -10,10 +10,12 @@ export function Stores() {
   const q = useStores();
   const [adding, setAdding] = useState(false);
   const list = q.data?.stores ?? [];
+  const live = list.filter(s => s.state !== 'deleting'), mine = live.filter(s => s.mine).length;
+  const full = !q.data || live.length >= q.data.max || mine >= q.data.maxPerUser;
   return (
     <>
-      <PageHeader eyebrow={`Workspace · ${list.length} of ${q.data?.max ?? '…'} extra stores`} title="Stores" accent="Stores"
-        actions={<Button variant="primary" onClick={() => setAdding(true)} disabled={!q.data || list.length >= q.data.max}><Plus size={15} />Create store</Button>} />
+      <PageHeader eyebrow={`Workspace · ${live.length} of ${q.data?.max ?? '…'} extra stores · ${mine} of ${q.data?.maxPerUser ?? '…'} yours`} title="Stores" accent="Stores"
+        actions={<Button variant="primary" onClick={() => setAdding(true)} disabled={full}><Plus size={15} />Create store</Button>} />
       <p className="max-w-[78ch] text-[14px] text-muted">
         Each store gets its own namespace with its own MySQL, WordPress, generated passwords and address, and its own MCP server: its tools appear as
         <span className="font-mono"> &lt;name&gt;__list_orders</span> and so on, for chat and every MCP client. Deleting a store removes its tools at once, then everything it had, including its data.
@@ -48,11 +50,12 @@ function StoreCard({ s }: { s: Store }) {
         <StoreIcon size={18} className="text-muted" />
         <h2 className="text-[17px] font-semibold">{s.title}</h2>
         <span className="chip">{s.slug}</span>
+        {s.mine && <span className="chip">yours</span>}
         <Pill kind={kind}>{label}{s.state === 'provisioning' ? ` · ${s.step ?? 'starting'} · ${elapsed} s` : ''}</Pill>
         {s.server && <StatusPill status={s.server.status} />}
         <span className="ml-auto flex gap-2">
-          {s.state === 'failed' && <Button disabled={retry.isPending} onClick={() => retry.mutate(undefined)}><RotateCcw size={14} />Retry</Button>}
-          {s.state !== 'deleting' && !asking && <Button variant="outline" onClick={() => setAsking(true)}><Trash2 size={14} />Delete</Button>}
+          {s.canManage && s.state === 'failed' && <Button disabled={retry.isPending} onClick={() => retry.mutate(undefined)}><RotateCcw size={14} />Retry</Button>}
+          {s.canManage && s.state !== 'deleting' && !asking && <Button variant="outline" onClick={() => setAsking(true)}><Trash2 size={14} />Delete</Button>}
         </span>
       </div>
       <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-[13px]">
@@ -62,7 +65,7 @@ function StoreCard({ s }: { s: Store }) {
         <dt className="text-muted">Settings</dt><dd>{s.currency} · {s.country} · {s.timezone}</dd>
         <dt className="text-muted">Created</dt><dd>{ago(s.createdAt)}{s.readyAt ? ` · ready ${ago(s.readyAt)}` : ''}</dd>
       </dl>
-      {s.state === 'ready' && <details className="text-[13px]"><summary className="cursor-pointer text-muted">Admin password (stays in the cluster; read it with kubectl)</summary><div className="mt-2"><CodeBox copy>{s.adminPasswordCommand}</CodeBox></div></details>}
+      {s.state === 'ready' && s.adminPasswordCommand && <details className="text-[13px]"><summary className="cursor-pointer text-muted">Admin password (stays in the cluster; read it with kubectl)</summary><div className="mt-2"><CodeBox copy>{s.adminPasswordCommand}</CodeBox></div></details>}
       {s.error && (s.state === 'failed' ? <ErrorNote>{s.error}</ErrorNote> : <WarnNote>Retrying: {s.error}</WarnNote>)}
       {asking && (
         <div className="grid gap-2 rounded-[10px] border border-bad/30 bg-bad-tint/30 p-3">

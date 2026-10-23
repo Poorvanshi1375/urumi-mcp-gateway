@@ -1,12 +1,14 @@
-// Bonus stores end to end (multi-store, P11), on a cluster with the provisioner and stores on.
-// Env: GW_URL, NS, KEY_ADMIN, STORE_CONNECT (host:port the storefronts answer on, e.g. 127.0.0.1:9080;
-// default: each store's own URL), STORE_MAX (provisioner.stores.max).
-// Side effects, undone before it exits: stores vdodaa, vdodbb, vdodcc and their namespaces; probe pods.
-import { execSync } from 'node:child_process';
+// Bonus stores end to end (multi-store, P11, P14, P15), on a cluster with the provisioner and stores on.
+// Env: GW_URL, NS, KEY_ADMIN, KEY_MEMBER and KEY_MEMBER2 (two members' API keys), STORE_CONNECT
+// (host:port the storefronts answer on, e.g. 127.0.0.1:9080; default: each store's own URL),
+// STORE_MAX (provisioner.stores.max). The chat step uses the language model (one turn).
+// Side effects, undone before it exits: stores vdodaa, vdodbb, vdodcc, vdodmm and their namespaces;
+// probe pods; three test orders in the bonus stores (deleted with them).
+import { execFileSync, execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import http from 'node:http';
 
-const { GW_URL, NS = 'urumi', KEY_ADMIN, STORE_CONNECT, STORE_MAX = '3' } = process.env;
+const { GW_URL, NS = 'urumi', KEY_ADMIN, KEY_MEMBER, KEY_MEMBER2, STORE_CONNECT, STORE_MAX = '3' } = process.env;
 let failed = 0;
 const must = (c, m) => { if (!c) throw new Error(m); };
 async function check(name, fn) {
@@ -14,8 +16,8 @@ async function check(name, fn) {
   catch (e) { failed++; console.log(`FAIL  ${name.padEnd(56)} ${e.message}`); }
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-async function api(method, path, body) {
-  const r = await fetch(`${GW_URL}${path}`, { method, headers: { authorization: `Bearer ${KEY_ADMIN}`, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
+async function api(method, path, body, key = KEY_ADMIN) {
+  const r = await fetch(`${GW_URL}${path}`, { method, headers: { authorization: `Bearer ${key}`, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
   return { status: r.status, body: await r.json().catch(() => ({})) };
 }
 async function mcp(method, params) {
@@ -50,7 +52,26 @@ async function waitReady(slugs, ms) {
 async function removeAll(slugs) {
   for (const slug of slugs) { const s = await store(slug); if (s && s.state !== 'deleting') await api('DELETE', `/api/stores/${s.id}?confirm=${slug}`); }
 }
-const TEST = ['vdodaa', 'vdodbb', 'vdodcc'];
+// One order today in a store, placed through WooCommerce inside the store's own WordPress container.
+function placeOrder(slug, qty) {
+  const php = `$_SERVER["HTTP_HOST"]="localhost"; require "/var/www/html/wp-load.php";
+    $p = wc_get_products(["status" => "publish", "limit" => 1])[0];
+    $o = wc_create_order(); $o->add_product($p, ${qty}); $o->set_billing_first_name("Check"); $o->calculate_totals(); $o->update_status("processing");
+    echo $o->get_id(), " ", $o->get_total();`;
+  const [id, total] = execFileSync('kubectl', ['exec', '-n', `store-${slug}`, 'deploy/store-wordpress', '-c', 'wordpress', '--', 'php', '-r', php], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })   // (WooCommerce's order email has no sendmail here).trim().split(' ');
+  return { id, total: Number(total) };
+}
+// One chat turn as the admin; the tools it used, whether called directly or through gateway__call_tool.
+async function chat(text) {
+  const r = await fetch(`${GW_URL}/api/chat`, { method: 'POST', headers: { authorization: `Bearer ${KEY_ADMIN}`, 'content-type': 'application/json' }, body: JSON.stringify({ messages: [{ role: 'user', text }] }) });
+  if (!r.ok) throw new Error(`chat: HTTP ${r.status} ${(await r.text()).slice(0, 200)}`);
+  const events = (await r.text()).split('\n\n').filter(c => c.startsWith('data: ')).map(c => JSON.parse(c.slice(6)));
+  const error = events.find(e => e.type === 'error')?.message;
+  if (error) throw new Error(`chat: ${error}`);
+  const used = events.filter(e => e.type === 'tool_start').map(e => (e.name === 'gateway__call_tool' ? e.args?.name : e.name) ?? e.name);
+  return { used, answer: events.find(e => e.type === 'text')?.text ?? '' };
+}
+const TEST = ['vdodaa', 'vdodbb', 'vdodcc', 'vdodmm'];
 
 await removeAll(TEST);
 for (let i = 0; i < 90 && (await Promise.all(TEST.map(store))).some(Boolean); i++) await sleep(3000);
@@ -105,20 +126,45 @@ try {
     must(own === 'REACHABLE' && toWp === 'BLOCKED' && toDb === 'BLOCKED' && toPg === 'BLOCKED' && secret('vdodaa') !== secret('vdodbb'), `own ${own}, B's WordPress ${toWp}, B's MySQL ${toDb}, Postgres ${toPg}`);
     return 'A reaches its own WordPress, not B\'s WordPress or MySQL, not Postgres; their secrets differ (compared by hash)';
   });
+  await check('chat compares today\'s orders across two stores (P15)', async () => {
+    const a = placeOrder('vdodaa', 1), b1 = placeOrder('vdodbb', 2), b2 = placeOrder('vdodbb', 1);
+    const c = await chat('Compare today\'s orders in the stores vdodaa and vdodbb: for each store, how many orders came in today and their total.');
+    const asked = s => c.used.some(n => n === `${s}__list_orders`);
+    must(asked('vdodaa') && asked('vdodbb'), `list_orders not called on both stores: ${c.used.join(', ')}`);
+    const totalB = b1.total + b2.total, words = c.answer.replace(/,/g, '');
+    must(words.includes(String(a.total)) && words.includes(String(totalB)), `answer lacks ${a.total} (vdodaa) or ${totalB} (vdodbb): ${c.answer.slice(0, 300)}`);
+    return `orders #${a.id} (vdodaa), #${b1.id} and #${b2.id} (vdodbb); chat called list_orders on both and gave totals ${a.total} and ${totalB}`;
+  });
+  await check('members manage their own stores; others are read-only (P14)', async () => {
+    const asMember = (await api('GET', '/api/stores', undefined, KEY_MEMBER)).body.stores?.find(s => s.slug === 'vdodaa');
+    must(asMember && !asMember.canManage && asMember.adminPasswordCommand === null, `member's view of an admin's store: ${JSON.stringify(asMember)?.slice(0, 160)}`);
+    const delOther = await api('DELETE', `/api/stores/${aa.id}?confirm=vdodaa`, undefined, KEY_MEMBER);
+    const retryOther = await api('POST', `/api/stores/${aa.id}/retry`, {}, KEY_MEMBER);
+    must(delOther.status === 403 && retryOther.status === 403, `member on an admin's store: delete ${delOther.status}, retry ${retryOther.status}`);
+    const made = await api('POST', '/api/stores', { slug: 'vdodmm', title: 'Member Store' }, KEY_MEMBER);
+    must(made.status === 200 && made.body.store?.mine && made.body.store.adminPasswordCommand, `member create: ${made.status} ${made.body.error ?? ''}`);
+    const byOther = await api('DELETE', `/api/stores/${made.body.store.id}?confirm=vdodmm`, undefined, KEY_MEMBER2);
+    must(byOther.status === 403, `another member deleting it: ${byOther.status}`);
+    const own = await api('DELETE', `/api/stores/${made.body.store.id}?confirm=vdodmm`, undefined, KEY_MEMBER);
+    must(own.status === 200, `the owner deleting it: ${own.status} ${own.body.error ?? ''}`);
+    return 'member sees an admin\'s store without actions or the password command, gets 403 on it; creates its own (with the command); another member 403; the owner deletes it';
+  });
   await check(`the limit holds (${STORE_MAX} stores); a delete stops an install`, async () => {
     const existing = (await api('GET', '/api/stores')).body.stores.filter(s => s.state !== 'deleting').length;
     const made = [];
     for (let i = existing; i < Number(STORE_MAX); i++) {
       const slug = i === existing ? 'vdodcc' : null;
       if (!slug) break;
-      const r = await api('POST', '/api/stores', { slug, title: 'Check Store C' });
+      // Another user: the admin already has two (vdodaa, vdodbb), its per-user limit.
+      const r = await api('POST', '/api/stores', { slug, title: 'Check Store C' }, KEY_MEMBER2);
       must(r.status === 200, `create ${slug}: ${r.status} ${r.body.error}`); made.push(r.body.store);
     }
     const now = (await api('GET', '/api/stores')).body.stores.filter(s => s.state !== 'deleting').length;
     let limitMsg = 'limit not reached here';
     if (now >= Number(STORE_MAX)) {
-      const over = await api('POST', '/api/stores', { slug: 'vdoddd', title: 'One too many' });
-      must(over.status === 409 && /limit reached/.test(over.body.error), `over the limit: ${over.status} ${over.body.error}`);
+      // A user with no live store of their own, so the overall limit is what refuses it.
+      const over = await api('POST', '/api/stores', { slug: 'vdoddd', title: 'One too many' }, KEY_MEMBER);
+      must(over.status === 409 && over.body.error === `limit reached: at most ${STORE_MAX} stores`, `over the limit: ${over.status} ${over.body.error}`);
       limitMsg = `store ${now + 1} refused (409 limit reached)`;
     }
     for (const c of made) {
@@ -140,6 +186,16 @@ try {
     const pvs = sh(`kubectl get pv -o jsonpath='{range .items[*]}{.spec.claimRef.namespace}{"\\n"}{end}'`).split('\n').filter(n => n === 'store-vdodbb').length;
     must(!(await store('vdodbb')) && ns.startsWith('ERR') && pvs === 0, `row ${Boolean(await store('vdodbb'))}, namespace ${ns}, volumes ${pvs}`);
     return `tools gone after ${gone} ms; namespace, volumes and row gone after ${Math.round((Date.now() - t0) / 1000)} s`;
+  });
+  await check('after the delete, chat no longer offers the store\'s tools (P15)', async () => {
+    const status = (await api('GET', '/api/chat/status')).body;
+    const listed = (status.toolNames ?? []).filter(n => n.startsWith('vdodbb__'));
+    const search = async q => JSON.stringify(await call('gateway__search_tools', { query: q }));
+    const hits = (await search('vdodbb orders')).match(/vdodbb__[a-z_]+/g) ?? [];
+    const control = (await search('vdodaa orders')).match(/vdodaa__[a-z_]+/g) ?? [];   // the search itself works
+    must(Array.isArray(status.toolNames) && status.toolNames.some(n => n.startsWith('vdodaa__')) && !listed.length && !hits.length && control.length,
+      `chat tools ${listed}; search for vdodbb ${hits}; control search for vdodaa ${control.length}`);
+    return `chat's tools have vdodaa__* and no vdodbb__*; a tool search for "vdodbb orders" finds none`;
   });
 } finally {
   await removeAll(TEST);

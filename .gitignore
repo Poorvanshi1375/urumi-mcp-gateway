@@ -16,3 +16,4 @@ docs/design/
 
 # internal working notes (plan, assignment copy, handoff, progress), never committed
 docs/internal/
+.claude/settings.local.json

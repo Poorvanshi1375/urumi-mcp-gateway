@@ -9,7 +9,7 @@ export type User = { id: string; email: string; name: string | null; role: Role;
 export type ToolDefinition = { title: string | null; description: string; inputSchema: unknown; outputSchema?: unknown; annotations?: unknown };
 export type Tool = { name: string; title?: string | null; description?: string; inputSchema?: unknown; outputSchema?: unknown; annotations?: unknown; exposedAs?: string; memberAllowed?: boolean; flags?: string[]; invalid?: string | null;
   chatConfirm?: 'auto' | 'always' | 'never'; asksInChat?: boolean;
-  pending?: boolean; approved?: ToolDefinition | null };
+  pending?: boolean; approved?: ToolDefinition | null; hash?: string };
 export type Features = { toolPinning: boolean; toolSearch: boolean; oauth: boolean; validateArguments?: boolean; provisioner?: boolean; stores?: boolean; memberDefault?: 'allow' | 'readOnly' };
 export type ChatStatus = { enabled: boolean; model: string | null; tools: number; toolNames?: string[]; confirmWrites?: boolean };
 export const useChatStatus = () => useQuery({ queryKey: ['chat-status'], queryFn: () => api<ChatStatus>('GET', '/api/chat/status') });
@@ -153,9 +153,9 @@ export const useHosted = () => useQuery({
 export type Store = {
   id: string; slug: string; title: string; host: string; url: string; adminUrl: string; adminUser: string; adminEmail: string;
   currency: string; country: string; timezone: string; state: HostedState; step: string | null; error: string | null; attempts: number;
-  createdAt: string; readyAt: string | null; namespace: string; adminPasswordCommand: string; server: { status: ServerStatus; tools: number } | null;
+  createdAt: string; readyAt: string | null; namespace: string; adminPasswordCommand: string | null; mine: boolean; canManage: boolean; server: { status: ServerStatus; tools: number } | null;
 };
-export type StoreList = { stores: Store[]; max: number; baseHost: string; currencies: string[]; countries: Record<string, string>; timezones: string[] };
+export type StoreList = { stores: Store[]; max: number; maxPerUser: number; baseHost: string; currencies: string[]; countries: Record<string, string>; timezones: string[] };
 export const useStores = () => useQuery({
   queryKey: ['stores'],
   queryFn: () => api<StoreList>('GET', '/api/stores'),

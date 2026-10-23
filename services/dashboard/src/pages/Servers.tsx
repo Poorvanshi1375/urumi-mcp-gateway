@@ -190,7 +190,7 @@ function Versions({ label, before, after }: { label: string; before: unknown; af
   );
 }
 function ReviewDrawer({ s, t, onClose }: { s: Server; t: Tool; onClose: () => void }) {
-  const approve = useApiMutation(() => api('POST', `/api/servers/${s.prefix}/tools/${encodeURIComponent(t.name)}/approve`, {}), [['servers']]);
+  const approve = useApiMutation(() => api('POST', `/api/servers/${s.prefix}/tools/${encodeURIComponent(t.name)}/approve`, { hash: t.hash }), [['servers']]);
   const now = { title: t.title ?? null, description: t.description ?? '', inputSchema: t.inputSchema ?? null, outputSchema: t.outputSchema ?? null, annotations: t.annotations ?? null };
   return (
     <Drawer title={`Review ${t.exposedAs ?? t.name}`} onClose={onClose}

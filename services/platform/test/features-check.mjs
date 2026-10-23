@@ -84,7 +84,8 @@ if (features.toolPinning && SHIP_URL && SHIP_TOKEN) {
     await check('pinning: upstream changes a description -> tool hidden', async () => {
       shipSuffix(RUG);
       const t0 = Date.now();
-      const hidden = await waitFor(async () => !(await names(member)).includes(`${P}__quote_shipping`) && !(await names(admin)).includes(`${P}__quote_shipping`), 60000);
+      // Hidden on every replica: four reads each as member and admin (requests spread over replicas).
+      const hidden = await waitFor(async () => (await Promise.all([member, member, member, member, admin, admin, admin, admin].map(names))).every(n => !n.includes(`${P}__quote_shipping`)), 60000);
       must(hidden, 'still listed 60 s after the change');
       const all = await names(member);
       must(all.includes(`${P}__get_order`) && all.includes(`${P}__track_shipment`), `unchanged tools gone too: ${all}`);
@@ -108,10 +109,15 @@ if (features.toolPinning && SHIP_URL && SHIP_TOKEN) {
     await check('pinning: member cannot approve; admin approves -> visible', async () => {
       const r = await fetch(`${GW_URL}/api/servers/${P}/tools/quote_shipping/approve`, { method: 'POST', headers: { authorization: `Bearer ${KEY_MEMBER}`, 'content-type': 'application/json' }, body: '{}' });
       must(r.status === 403, `member approve -> ${r.status}`);
-      await api('POST', `/api/servers/${P}/tools/quote_shipping/approve`, {});
+      // An approval names the version reviewed (the dashboard sends its hash): another one is refused.
+      const stale = await fetch(`${GW_URL}/api/servers/${P}/tools/quote_shipping/approve`, { method: 'POST', headers: { authorization: `Bearer ${KEY_ADMIN}`, 'content-type': 'application/json' }, body: JSON.stringify({ hash: '0'.repeat(64) }) });
+      must(stale.status === 409, `approve with another version's hash -> ${stale.status}`);
+      const reviewed = await shipTool('quote_shipping');
+      must(/^[0-9a-f]{64}$/.test(reviewed?.hash ?? ''), `no hash for the pending tool: ${JSON.stringify(reviewed)?.slice(0, 120)}`);
+      await api('POST', `/api/servers/${P}/tools/quote_shipping/approve`, { hash: reviewed.hash });
       const back = await waitFor(async () => (await names(member)).includes(`${P}__quote_shipping`), 15000, 500);
       must(back, 'not listed after approval');
-      return 'member 403; listed again after the admin approved this version';
+      return 'member 403; another version\'s hash 409; listed again after the admin approved the reviewed version (by hash)';
     });
   } finally {
     shipSuffix('');   // back to the original description, then approve it again

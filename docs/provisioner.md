@@ -67,7 +67,7 @@ A third-party image will not check the bearer token; the NetworkPolicy is the bo
 
 ## Bonus stores
 
-An admin opens **Stores**, gives a name (2 to 12 lowercase letters or digits), a title, a currency, a country and a timezone, and gets a complete WooCommerce store in about two minutes, at `http://<name>.<baseHost>` (`<name>.store.localhost:9080` on k3d, `<name>.store.<ip>.nip.io` on the VPS). Several can be created at once.
+Any user opens **Stores**, gives a name (2 to 12 lowercase letters or digits), a title, a currency, a country and a timezone, and gets a complete WooCommerce store in about two minutes, at `http://<name>.<baseHost>` (`<name>.store.localhost:9080` on k3d, `<name>.store.<ip>.nip.io` on the VPS). Several can be created at once. Each user may have `provisioner.stores.maxPerUser` (2) stores of their own, within `max` for the whole install (both counted inside the create's transaction, under the same lock as the name check; 409 with the limit named). The creator and admins may retry or delete a store; everyone sees the list. A store's MCP server is registered for the whole organisation like the default store, so every member gets its read tools: one team, shared stores.
 
 Each store is the **same `urumi-store` chart** as the default store, installed by the provisioner with Helm (`helm upgrade --install`, values only, nothing secret in them) in its own namespace `store-<name>`:
 
@@ -82,14 +82,14 @@ Its tools are `<name>__list_orders` and so on; results carry `store: { title, ur
 
 **Delete** needs the store's name typed (it destroys the store's data). The tools go at once, in the request itself; then the namespace, with the Helm release, the Secret and both volumes, and the provisioner waits until the volumes are released before removing the row. A Delete that arrives during an install stops it.
 
-The admin password stays in the cluster: the Stores page shows the `kubectl` command that reads it, never the password (the gateway faces the internet and never handles store credentials).
+The admin password stays in the cluster: the Stores page shows the store's creator and admins the `kubectl` command that reads it, never the password (the gateway faces the internet and never handles store credentials).
 
-**Checked by `services/platform/test/stores-check.mjs`** (in `scripts/verify-dod.sh --all`): two stores created at the same time are both Ready (about four minutes in parallel on a laptop) even with the provisioner restarted mid-way, with no duplicate rows; each storefront serves its own store; each store's MCP server answers as that store; a product created in one is not listed by the other; one store's MCP server reaches its own WordPress but not the other store's WordPress or MySQL, nor Postgres, and their secrets differ (compared by hash); the limit refuses one store too many; a store deleted during its install is removed; deleting a store removes its tools in under 100 ms, then its namespace, volumes and row.
+**Checked by `services/platform/test/stores-check.mjs`** (in `scripts/verify-dod.sh --all`): two stores created at the same time are both Ready (about four minutes in parallel on a laptop) even with the provisioner restarted mid-way, with no duplicate rows; each storefront serves its own store; each store's MCP server answers as that store; a product created in one is not listed by the other; one store's MCP server reaches its own WordPress but not the other store's WordPress or MySQL, nor Postgres, and their secrets differ (compared by hash); the limit refuses one store too many; a store deleted during its install is removed; **chat compares today's orders across two stores** (one order placed today in one, two in the other: chat must call `list_orders` on both and give each store's total), and after one store is deleted chat's tools and a tool search no longer include it; a member sees others' stores without actions or the password command and gets 403 on them, creates and deletes their own, and another member gets 403 on it; deleting a store removes its tools in under a second, then its namespace, volumes and row. The per-user limit is checked against the real database by `provision-rows-check` (a third store refused, a store being deleted not counted, the overall limit applied first).
 
 ## Limits
 
 - `provisioner.hosted.maxServers` (5) hosted servers; each must be ready within `timeoutMinutes` (3).
-- `provisioner.stores.max` bonus stores (3 on k3d, 2 on the 8 GiB VPS: each takes about 0.6 GiB of requests); each must be ready within `timeoutMinutes` (10).
+- `provisioner.stores.max` bonus stores (3 on k3d, 2 on the 8 GiB VPS: each takes about 0.6 GiB of requests), at most `maxPerUser` (2) per user; each must be ready within `timeoutMinutes` (10).
 - Bonus stores are served over plain http (Let's Encrypt per store on nip.io is possible but rate-limited; not enabled).
 - One provisioner replica (leases would make two safe).
 - stdio servers run through the bridge, one session for all callers: servers that keep per-client state are not separated per caller.
