@@ -17,6 +17,7 @@
 // Run: node scripts/chart-invariants.mjs            (needs helm; uses services/platform's yaml package)
 //      node scripts/chart-invariants.mjs --self-test (breaks a render on purpose and expects failures)
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { isProvisioner, podSecurityProblems } from './lib/pod-security.mjs';
@@ -41,7 +42,7 @@ const INTERNAL = /mysql|postgres|mcp/;   // workloads that must never be reachab
 
 export function render({ chart, values, set }) {
   const out = execFileSync('helm', ['template', chart === 'urumi-store' ? 'store' : 'platform', `${root}infra/helm/${chart}`, '-n', 'urumi',
-    '-f', `${root}infra/helm/${chart}/${values}`, ...set], { encoding: 'utf8' });
+    '-f', `${root}infra/helm/${chart}/${values}`, ...set], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });   // stderr kept in the error
   return YAML.parseAllDocuments(out).map(d => d.toJS()).filter(Boolean);
 }
 
@@ -129,6 +130,19 @@ function rbacProblems(docs) {
   return bad;
 }
 
+// Each chart has a values schema, and it refuses a bad value: helm lint, install and upgrade then
+// stop a wrong type, enum or host before anything reaches the cluster.
+const SCHEMA_BREAKS = [
+  { chart: 'urumi-store', values: 'values-local.yaml', set: ['--set', 'store.currency=rupees'] },
+  { chart: 'urumi-platform', values: 'values-local.yaml', set: [...IMAGES, '--set', 'platform.permissions.memberDefault=everyone'] },
+];
+function schemaProblems(break_) {
+  const bad = existsSync(`${root}infra/helm/${break_.chart}/values.schema.json`) ? [] : [`${break_.chart}: no values.schema.json`];
+  try { render({ ...break_, set: break_.set }); bad.push(`${break_.chart}: a bad value (${break_.set.at(-1)}) was accepted`); }
+  catch (e) { if (!/schema|don't meet the specifications/i.test(String(e.stderr ?? e.message))) bad.push(`${break_.chart}: a bad value failed for another reason: ${String(e.stderr ?? e.message).slice(0, 120)}`); }
+  return bad;
+}
+
 const workloads = docs => docs.filter(d => ['Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob'].includes(d.kind)).length;
 
 function main() {
@@ -162,6 +176,9 @@ function main() {
     prov.find(d => d.kind === 'NetworkPolicy' && /-provisioner$/.test(d.metadata.name)).spec.egress.push({ ports: [{ port: 443, protocol: 'TCP' }] });
     found.push(...problems(prov));
     want.push('only the urumi.dev/role=mcp pods', 'every namespace', 'Secrets cluster-wide', 'bind without resourceNames', 'not the provisioner', 'failurePolicy Ignore', 'validationActions \\[Deny\\]', 'admission policy "images" missing', 'provisioner egress on port 443');
+    // The schema check itself: a value the schema allows must be reported as "accepted".
+    found.push(...schemaProblems({ chart: 'urumi-platform', values: 'values-local.yaml', set: [...IMAGES, '--set', 'platform.permissions.memberDefault=readOnly'] }));
+    want.push('a bad value \\(platform.permissions.memberDefault=readOnly\\) was accepted');
     const missed = want.filter(w => !found.some(f => new RegExp(w).test(f)));
     console.log(missed.length ? `SELF-TEST FAILED: not detected: ${missed.join(', ')}` : `SELF-TEST PASSED: all ${want.length} breaks detected`);
     process.exit(missed.length ? 1 : 0);
@@ -173,6 +190,11 @@ function main() {
     const bad = problems(docs);
     if (bad.length) failed++;
     console.log(`${bad.length ? 'FAIL' : 'PASS'}  ${`${r.chart} ${r.values}${r.label ? ` (${r.label})` : ''}`.padEnd(36)} ${bad.length ? bad.join('; ') : `${docs.length} objects, ${workloads(docs)} workloads`}`);
+  }
+  for (const b of SCHEMA_BREAKS) {
+    const bad = schemaProblems(b);
+    if (bad.length) failed++;
+    console.log(`${bad.length ? 'FAIL' : 'PASS'}  ${`${b.chart} values schema`.padEnd(36)} ${bad.length ? bad.join('; ') : `refuses ${b.set.at(-1)}`}`);
   }
   console.log(failed ? 'CHART INVARIANTS FAILED' : 'CHART INVARIANTS PASSED');
   process.exit(failed ? 1 : 0);

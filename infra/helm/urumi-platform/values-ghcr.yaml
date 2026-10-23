@@ -1,0 +1,18 @@
+# Install without building: our images as CI publishes them to GHCR on a version tag
+# (.github/workflows/publish.yml). Use on top of values-local.yaml or values-prod.yaml:
+#   helm upgrade --install platform infra/helm/urumi-platform -n urumi \
+#     -f infra/helm/urumi-platform/values-prod.yaml -f infra/helm/urumi-platform/values-ghcr.yaml ...
+# The tag is the release's version tag; every image of a release has the same one.
+image: { repository: ghcr.io/poorvanshi1375/urumi-platform, tag: "v1.0.0", pullPolicy: IfNotPresent }
+wooMcp:
+  image: { repository: ghcr.io/poorvanshi1375/urumi-woo-mcp, tag: "v1.0.0", pullPolicy: IfNotPresent }   # also each bonus store's own server
+shipMcp:
+  image: { repository: ghcr.io/poorvanshi1375/urumi-ship-mcp, tag: "v1.0.0", pullPolicy: IfNotPresent }
+provisioner:
+  image: { repository: ghcr.io/poorvanshi1375/urumi-provisioner, tag: "v1.0.0", pullPolicy: IfNotPresent }
+  hosted:
+    # Hosted servers may also come from our own GHCR images (the stdio bridge is one of them).
+    allowedImages: ["docker.io/library/urumi-", "docker.io/mcp/", "ghcr.io/poorvanshi1375/urumi-"]
+    bridgeImage: ghcr.io/poorvanshi1375/urumi-mcp-bridge:v1.0.0
+  stores:
+    pluginImage: ghcr.io/poorvanshi1375/urumi-woocommerce-zip:v1.0.0

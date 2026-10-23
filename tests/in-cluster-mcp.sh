@@ -20,10 +20,13 @@ metadata:
   labels: $2
 spec:
   restartPolicy: Never
+  # Restricted Pod Security, like the namespace enforces: the image's node user, no privileges.
+  securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, seccompProfile: { type: RuntimeDefault } }
   containers:
     - name: t
       image: node:24-alpine
       imagePullPolicy: IfNotPresent
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
       workingDir: /work
       command: ["sh", "-c", "cp /src/* /work/ && $3"]
       env:

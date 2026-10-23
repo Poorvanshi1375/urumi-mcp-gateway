@@ -68,6 +68,13 @@ export function storeSteps(env: StoreEnv, row: StoreRow): Step<null>[] {
     { name: 'quota', run: () => apply({ apiVersion: 'v1', kind: 'ResourceQuota', metadata: meta('tenant'), spec: { hard: {
       pods: '8', 'requests.cpu': '1', 'limits.cpu': '4', 'requests.memory': '1536Mi', 'limits.memory': '3Gi',
       persistentvolumeclaims: '2', 'requests.storage': '10Gi', 'services.loadbalancers': '0', 'services.nodeports': '0' } } } as K8sObject) },
+    // Per container and per volume: the chart's largest container is 1 CPU / 768Mi and its largest
+    // volume 5Gi; a container without its own resources gets the defaults.
+    { name: 'limits', run: () => apply({ apiVersion: 'v1', kind: 'LimitRange', metadata: meta('tenant'), spec: { limits: [
+      { type: 'Container', max: { cpu: '1', memory: '1Gi' }, min: { cpu: '10m', memory: '16Mi' },
+        default: { cpu: '250m', memory: '256Mi' }, defaultRequest: { cpu: '50m', memory: '64Mi' } },
+      { type: 'PersistentVolumeClaim', max: { storage: '5Gi' } },
+    ] } } as K8sObject) },
     { name: 'secret', run: async () => {
       // Made once and kept: MySQL keeps the first password it was given, so it must never change.
       if (await env.k8s.get('Secret', ns, 'store-secrets')) return 'done';

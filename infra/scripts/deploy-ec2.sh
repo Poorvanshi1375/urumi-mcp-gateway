@@ -25,6 +25,9 @@ IMAGES=("urumi-platform:$PT" "urumi-woo-mcp:$WT" "urumi-ship-mcp:$ST")
 [ -n "$PV" ] && IMAGES+=("urumi-provisioner:$PV")
 [ -n "$PLUGIN" ] && IMAGES+=("$PLUGIN")
 [ -n "$BRIDGE" ] && IMAGES+=("$BRIDGE")
+# Test only: the malicious MCP server evil-check hosts (verify-dod --all). The platform never runs it
+# by itself; it only has to be on the node so that check can host it there too.
+EVIL_TAG=$(infra/scripts/build-image.sh evil-mcp 2>/dev/null | tail -1) && [ -n "$EVIL_TAG" ] && IMAGES+=("urumi-evil-mcp:$EVIL_TAG")
 
 step "k3s $K3S_VERSION on $IP"
 "${SSH[@]}" "command -v k3s >/dev/null && sudo k3s --version | head -1 || (curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' sh -s - --write-kubeconfig-mode 644 --secrets-encryption)"
@@ -68,6 +71,9 @@ if kubectl get secret -n "$NS" platform-llm >/dev/null 2>&1; then
 else echo "  no local platform-llm secret: chat will report 'not configured'"; fi
 "${SSH[@]}" "cd ~/urumi-helm && NS=$NS KUBECTL='sudo k3s kubectl' bash secrets.sh $GEM; rm -f ~/urumi-helm/gemini-api-key ~/urumi-helm/fallback-api-key"
 
+step "Pod Security restricted on $NS (every pod passes it)"
+"${SSH[@]}" "sudo k3s kubectl label namespace $NS --overwrite pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/audit=restricted"
+
 step "cert-manager $CERT_MANAGER_VERSION and the Let's Encrypt issuer (HTTP-01 through Traefik)"
 "${SSH[@]}" "export KUBECONFIG=/etc/rancher/k3s/k3s.yaml; \
   helm repo add jetstack https://charts.jetstack.io >/dev/null 2>&1; helm repo update jetstack >/dev/null && \
@@ -92,7 +98,7 @@ step "store chart (store.host=$STORE_HOST)"
 "${SSH[@]}" "export KUBECONFIG=/etc/rancher/k3s/k3s.yaml; cd ~/urumi-helm && \
   helm lint urumi-store -f urumi-store/values-prod.yaml --set store.host=$STORE_HOST --set store.homeUrl=https://$STORE_HOST | tail -1 && \
   helm upgrade --install store urumi-store -n $NS -f urumi-store/values-prod.yaml \
-    --set store.host=$STORE_HOST --set store.homeUrl=https://$STORE_HOST --wait --timeout 15m | grep -E 'STATUS|REVISION'"
+    --set store.host=$STORE_HOST --set store.homeUrl=https://$STORE_HOST ${PLUGIN:+--set woocommerce.pluginImage=$PLUGIN} --wait --timeout 15m | grep -E 'STATUS|REVISION'"
 
 step "platform chart (app host=$APP_HOST)"
 # The store's home URL is https, but woo-mcp calls WordPress over plain HTTP inside the cluster, so

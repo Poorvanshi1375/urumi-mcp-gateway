@@ -49,6 +49,9 @@ jobs:
           helm lint --strict infra/helm/urumi-platform -f infra/helm/urumi-platform/values-local.yaml $IMG
           helm lint --strict infra/helm/urumi-platform -f infra/helm/urumi-platform/values-prod.yaml $IMG \
             --set platform.ingress.host=app.203.0.113.10.nip.io --set wooMcp.store.signingBaseUrl=http://store.203.0.113.10.nip.io
+          # Install without building: prod values with the GHCR images (values-ghcr.yaml).
+          helm lint --strict infra/helm/urumi-platform -f infra/helm/urumi-platform/values-prod.yaml -f infra/helm/urumi-platform/values-ghcr.yaml \
+            --set platform.ingress.host=app.203.0.113.10.nip.io --set wooMcp.store.signingBaseUrl=http://store.203.0.113.10.nip.io
 
       - name: Rendered-chart invariants
         run: node scripts/chart-invariants.mjs && node scripts/chart-invariants.mjs --self-test
@@ -77,9 +80,13 @@ jobs:
           docker build -t urumi-platform:ci -f services/platform/Dockerfile services
           docker build -t urumi-woo-mcp:ci -f services/woo-mcp/Dockerfile services/woo-mcp
           docker build -t urumi-ship-mcp:ci -f services/ship-mcp/Dockerfile services/ship-mcp
+          # The provisioner is the platform image plus Helm and the store chart (repository root context).
+          docker build -t urumi-provisioner:ci --build-arg PLATFORM_IMAGE=urumi-platform:ci -f infra/images/provisioner/Dockerfile .
+          docker build -t urumi-mcp-bridge:ci -f infra/images/mcp-bridge/Dockerfile infra/images/mcp-bridge
+          docker build -t urumi-woocommerce-zip:ci -f infra/images/woocommerce-zip/Dockerfile infra/images/woocommerce-zip
       - name: Our images (fail on fixable CRITICAL, report HIGH)
         run: |
-          for i in platform woo-mcp ship-mcp; do
+          for i in platform woo-mcp ship-mcp provisioner mcp-bridge; do
             $TRIVY image --quiet --ignore-unfixed --severity HIGH urumi-$i:ci
             $TRIVY image --quiet --ignore-unfixed --severity CRITICAL --exit-code 1 urumi-$i:ci
           done

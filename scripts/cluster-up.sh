@@ -50,6 +50,10 @@ if [ "$(kubectl -n kube-system get svc traefik -o jsonpath='{.spec.type}')" != C
   echo "Traefik switched to hostPort 80/443"
 fi
 kubectl get namespace "$NS" >/dev/null 2>&1 || kubectl create namespace "$NS" >/dev/null
+# Pod Security "restricted" for the store and the platform (every pod passes it; G5). Bonus stores and
+# hosted servers get their own namespaces, labeled by the provisioner.
+kubectl label namespace "$NS" --overwrite pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/warn=restricted pod-security.kubernetes.io/audit=restricted >/dev/null
 
 # Third-party images the charts and test pods use, pulled on the host and loaded into every node
 # (pulls from inside k3d nodes time out intermittently on Docker Desktop). Skipped when present.

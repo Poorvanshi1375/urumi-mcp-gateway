@@ -1,0 +1,244 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "urumi-platform values",
+  "description": "Checked by helm lint, install and upgrade: a wrong type, an unknown enum value, a bad host or URL, or a flag with no value fails before anything reaches the cluster. Unlisted keys are allowed (charts grow); the ones that matter are typed.",
+  "type": "object",
+  "definitions": {
+    "host": { "type": "string", "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$" },
+    "url": { "type": "string", "pattern": "^(https?://[^\\s/]+(/.*)?)?$" },
+    "quantity": { "type": ["string", "number"], "pattern": "^[0-9]+(\\.[0-9]+)?(m|k|Ki|M|Mi|G|Gi|T|Ti)?$" },
+    "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "count": { "type": "integer", "minimum": 0 },
+    "positive": { "type": "integer", "minimum": 1 },
+    "image": {
+      "type": "object",
+      "required": ["repository", "tag"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "not": { "const": "latest" } },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "cpuMemory": {
+      "type": "object",
+      "required": ["cpu", "memory"],
+      "properties": { "cpu": { "$ref": "#/definitions/quantity" }, "memory": { "$ref": "#/definitions/quantity" } }
+    },
+    "resources": {
+      "type": "object",
+      "required": ["requests", "limits"],
+      "properties": { "requests": { "$ref": "#/definitions/cpuMemory" }, "limits": { "$ref": "#/definitions/cpuMemory" } }
+    },
+    "podLabels": { "type": "object", "minProperties": 1, "additionalProperties": { "type": "string" } },
+    "peer": { "type": "object", "required": ["podLabels"], "properties": { "namespace": { "type": "string" }, "podLabels": { "$ref": "#/definitions/podLabels" } } },
+    "cidr": { "type": "string", "pattern": "^[0-9a-fA-F:.]+(/[0-9]{1,3})?$" },
+    "tls": { "type": "object", "properties": { "enabled": { "type": "boolean" }, "secretName": { "type": "string" }, "redirectHttp": { "type": "boolean" } } }
+  },
+  "required": ["image", "postgres", "platform", "networkPolicy", "provisioner", "wooMcp", "shipMcp"],
+  "properties": {
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "image": { "$ref": "#/definitions/image" },
+    "secrets": { "type": "object", "properties": { "existingSecret": { "type": "string" } } },
+    "postgres": {
+      "type": "object",
+      "required": ["image", "database", "user", "appUser", "persistence", "resources"],
+      "properties": {
+        "image": { "allOf": [{ "$ref": "#/definitions/image" }, { "properties": { "tag": { "minLength": 1 } } }] },
+        "database": { "type": "string", "pattern": "^[a-z_][a-z0-9_]*$" },
+        "user": { "type": "string", "pattern": "^[a-z_][a-z0-9_]*$" },
+        "appUser": { "type": "string", "pattern": "^[a-z_][a-z0-9_]*$" },
+        "provisionerUser": { "type": "string", "pattern": "^[a-z_][a-z0-9_]*$" },
+        "runAsUser": { "$ref": "#/definitions/positive" },
+        "persistence": { "type": "object", "required": ["size"], "properties": { "size": { "$ref": "#/definitions/quantity" }, "storageClass": { "type": "string" } } },
+        "resources": { "$ref": "#/definitions/resources" }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "required": ["replicas", "rateLimit", "ingress", "features", "permissions", "chat", "resources"],
+      "properties": {
+        "replicas": { "$ref": "#/definitions/positive" },
+        "autoscaling": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "minReplicas": { "$ref": "#/definitions/positive" },
+            "maxReplicas": { "$ref": "#/definitions/positive" },
+            "targetCPUUtilizationPercentage": { "type": "integer", "minimum": 1, "maximum": 100 }
+          }
+        },
+        "metrics": { "type": "object", "properties": { "port": { "$ref": "#/definitions/port" } } },
+        "rateLimit": {
+          "type": "object",
+          "properties": {
+            "perMinute": { "$ref": "#/definitions/count" }, "burst": { "$ref": "#/definitions/count" },
+            "chatPerMinute": { "$ref": "#/definitions/count" }, "chatBurst": { "$ref": "#/definitions/count" },
+            "authFailuresPerMinute": { "$ref": "#/definitions/count" }
+          }
+        },
+        "ingress": {
+          "type": "object",
+          "required": ["enabled", "className"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "className": { "type": "string", "minLength": 1 },
+            "host": { "$ref": "#/definitions/host" },
+            "annotations": { "type": "object", "additionalProperties": { "type": "string" } },
+            "tls": { "$ref": "#/definitions/tls" }
+          }
+        },
+        "upstreamHealthIntervalMs": { "type": "integer", "minimum": 1000 },
+        "upstreamHealthTimeoutMs": { "type": "integer", "minimum": 500 },
+        "upstreamCallTimeoutMs": { "type": "integer", "minimum": 1000 },
+        "upstreamMaxResponseBytes": { "type": "integer", "minimum": 1024 },
+        "upstreamHealthFailureThreshold": { "$ref": "#/definitions/positive" },
+        "upstreamBulkhead": {
+          "type": "object",
+          "properties": { "maxConcurrentCalls": { "$ref": "#/definitions/positive" }, "maxQueuedCalls": { "$ref": "#/definitions/count" }, "queueWaitMs": { "$ref": "#/definitions/count" } }
+        },
+        "ssrf": {
+          "type": "object",
+          "properties": {
+            "allowHosts": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "denyHosts": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "allowCidrs": { "type": "array", "items": { "$ref": "#/definitions/cidr" } },
+            "denyCidrs": { "type": "array", "items": { "$ref": "#/definitions/cidr" } }
+          }
+        },
+        "features": {
+          "type": "object",
+          "properties": {
+            "toolPinning": { "type": "boolean" }, "toolSearch": { "type": "boolean" }, "oauth": { "type": "boolean" }, "validateArguments": { "type": "boolean" }
+          },
+          "additionalProperties": { "type": "boolean" }
+        },
+        "permissions": { "type": "object", "properties": { "memberDefault": { "enum": ["allow", "readOnly"] } } },
+        "publicUrl": { "$ref": "#/definitions/url" },
+        "bootstrap": {
+          "type": "object",
+          "properties": {
+            "adminEmail": { "type": "string", "pattern": "^[^@\\s]+@[^@\\s]+$" },
+            "extraUpstreams": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["prefix", "name", "url", "authType"],
+                "properties": {
+                  "prefix": { "type": "string", "pattern": "^[a-z0-9]{2,12}$" },
+                  "name": { "type": "string", "minLength": 1 },
+                  "url": { "type": "string", "pattern": "^https?://" },
+                  "authType": { "enum": ["none", "bearer", "header"] }
+                }
+              }
+            }
+          }
+        },
+        "chat": {
+          "type": "object",
+          "properties": {
+            "secretName": { "type": "string", "minLength": 1 },
+            "secretKey": { "type": "string", "minLength": 1 },
+            "models": { "type": "string", "minLength": 1 },
+            "maxSteps": { "type": "integer", "minimum": 1, "maximum": 20 },
+            "confirmWrites": { "type": "boolean" },
+            "fallback": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "baseUrl": { "type": "string", "pattern": "^https://" },
+                "model": { "type": "string", "minLength": 1 },
+                "secretKey": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        },
+        "resources": { "$ref": "#/definitions/resources" }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "ingressController": { "$ref": "#/definitions/peer" },
+        "dns": { "$ref": "#/definitions/peer" },
+        "metricsScrapers": { "type": "array", "items": { "$ref": "#/definitions/peer" } },
+        "gatewayEgress": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "publicPorts": { "type": "array", "items": { "type": "object", "required": ["port"], "properties": { "port": { "$ref": "#/definitions/port" }, "protocol": { "enum": ["TCP", "UDP"] } } } },
+            "exceptCidrs": { "type": "array", "items": { "$ref": "#/definitions/cidr" } }
+          }
+        }
+      }
+    },
+    "provisioner": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "$ref": "#/definitions/image" },
+        "resources": { "$ref": "#/definitions/resources" },
+        "apiServer": {
+          "type": "object",
+          "properties": { "ports": { "type": "array", "items": { "$ref": "#/definitions/port" } }, "cidrs": { "type": "array", "items": { "$ref": "#/definitions/cidr" } } }
+        },
+        "hosted": {
+          "type": "object",
+          "properties": {
+            "allowedImages": { "type": "array", "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.:/_-]*/" } },
+            "maxServers": { "$ref": "#/definitions/count" },
+            "bridgeImage": { "type": "string", "not": { "pattern": ":latest$" } },
+            "timeoutMinutes": { "$ref": "#/definitions/positive" }
+          }
+        },
+        "stores": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "max": { "$ref": "#/definitions/count" },
+            "maxPerUser": { "$ref": "#/definitions/positive" },
+            "timeoutMinutes": { "$ref": "#/definitions/positive" },
+            "baseHost": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" },
+            "homeUrlTemplate": { "type": "string", "pattern": "^https?://.*\\{host\\}" },
+            "signingUrlTemplate": { "type": "string", "pattern": "^https?://.*\\{host\\}" },
+            "pluginImage": { "type": "string" },
+            "values": { "type": "object" }
+          }
+        }
+      },
+      "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+      "then": { "properties": { "image": { "properties": { "tag": { "minLength": 1 } } } } }
+    },
+    "migrate": { "type": "object", "properties": { "resources": { "$ref": "#/definitions/resources" } } },
+    "wooMcp": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "$ref": "#/definitions/image" },
+        "store": {
+          "type": "object",
+          "properties": {
+            "secretName": { "type": "string", "minLength": 1 },
+            "signingBaseUrl": { "$ref": "#/definitions/url" },
+            "connectHost": { "type": "string", "minLength": 1 },
+            "wordpressPodLabels": { "$ref": "#/definitions/podLabels" }
+          }
+        },
+        "timeoutMs": { "type": "integer", "minimum": 1000 },
+        "resources": { "$ref": "#/definitions/resources" }
+      }
+    },
+    "shipMcp": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "$ref": "#/definitions/image" },
+        "simulatedLatencyMs": { "$ref": "#/definitions/count" },
+        "testDescriptionSuffix": { "type": "string" },
+        "testAnnotationsOverride": { "type": "string" },
+        "resources": { "$ref": "#/definitions/resources" }
+      }
+    }
+  }
+}

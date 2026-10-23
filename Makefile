@@ -31,8 +31,11 @@ images:
 
 install: install-store install-platform
 
+# The pre-baked image gives the store WooCommerce from a checked file and the seed products' photos.
 install-store:
-	helm upgrade --install store infra/helm/urumi-store -n $(NS) -f $(STORE_VALUES) --wait --timeout 15m
+	WZ=$$(infra/scripts/build-image.sh woocommerce-zip | tail -1); \
+	helm upgrade --install store infra/helm/urumi-store -n $(NS) -f $(STORE_VALUES) \
+	  --set woocommerce.pluginImage=urumi-woocommerce-zip:$$WZ --wait --timeout 15m
 
 # The store must exist first: woo-mcp reads the Woo REST key from store-secrets and calls WordPress.
 install-platform:

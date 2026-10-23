@@ -72,7 +72,7 @@ try {
     const host = 'mcp.mcp-vdodev.svc.cluster.local';
     const gw = reachFrom(`-n ${NS} deploy/platform -c platform`, host, 8080);
     const probe = `vdod-hosted-probe-${Date.now()}`;
-    sh(`kubectl run ${probe} -n ${NS} --labels=vdod=probe,app=intruder --restart=Never --image=busybox:1.37 --overrides='{"spec":{"containers":[{"name":"p","image":"busybox:1.37","command":["sh","-c","sleep 8; nc -w 3 -z ${host} 8080 && echo REACHABLE || echo BLOCKED"],"resources":{"requests":{"cpu":"10m","memory":"16Mi"},"limits":{"cpu":"100m","memory":"32Mi"}}}]}}'`);
+    sh(`kubectl run ${probe} -n ${NS} --labels=vdod=probe,app=intruder --restart=Never --image=busybox:1.37 --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"runAsGroup":65534,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"p","image":"busybox:1.37","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},"command":["sh","-c","sleep 8; nc -w 3 -z ${host} 8080 && echo REACHABLE || echo BLOCKED"],"resources":{"requests":{"cpu":"10m","memory":"16Mi"},"limits":{"cpu":"100m","memory":"32Mi"}}}]}}'`);
     sh(`kubectl wait pod/${probe} -n ${NS} --for=jsonpath='{.status.phase}'=Succeeded --timeout=90s`);
     const other = sh(`kubectl logs -n ${NS} ${probe}`);
     sh(`kubectl delete pod -n ${NS} ${probe} --wait=false`);

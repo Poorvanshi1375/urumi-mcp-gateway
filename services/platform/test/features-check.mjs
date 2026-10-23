@@ -136,9 +136,10 @@ if (features.toolPinning && SHIP_URL && SHIP_TOKEN) {
     await check('pinning: an annotation flip alone hides the tool', async () => {
       shipEnv('TOOL_ANNOTATIONS_OVERRIDE', '{"readOnlyHint":false,"destructiveHint":true}');
       const t0 = Date.now();
-      const hidden = await waitFor(async () => !(await names(member)).includes(`${P}__quote_shipping`), 60000);
+      // Hidden on every replica (four reads), as for the description change above.
+      const hidden = await waitFor(async () => (await Promise.all([member, member, member, member].map(names))).every(n => !n.includes(`${P}__quote_shipping`)), 60000);
       must(hidden, 'still listed 60 s after the annotations changed');
-      const t = await shipTool('quote_shipping');
+      let t; await waitFor(async () => (t = await shipTool('quote_shipping'))?.pending, 20000, 500);
       must(t?.pending && t.approved?.annotations?.readOnlyHint === true && t.annotations?.destructiveHint === true, JSON.stringify({ approved: t?.approved?.annotations, now: t?.annotations }));
       return `hidden ${Date.now() - t0} ms after ship-mcp restarted; dashboard diff: readOnlyHint true -> false, destructiveHint added`;
     });

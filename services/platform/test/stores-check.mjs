@@ -57,9 +57,13 @@ function placeOrder(slug, qty) {
   const php = `$_SERVER["HTTP_HOST"]="localhost"; require "/var/www/html/wp-load.php";
     $p = wc_get_products(["status" => "publish", "limit" => 1])[0];
     $o = wc_create_order(); $o->add_product($p, ${qty}); $o->set_billing_first_name("Check"); $o->calculate_totals(); $o->update_status("processing");
-    echo $o->get_id(), " ", $o->get_total();`;
-  const [id, total] = execFileSync('kubectl', ['exec', '-n', `store-${slug}`, 'deploy/store-wordpress', '-c', 'wordpress', '--', 'php', '-r', php], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })   // (WooCommerce's order email has no sendmail here).trim().split(' ');
-  return { id, total: Number(total) };
+    echo "\\nORDER ", $o->get_id(), " ", $o->get_total(), "\\n";`;
+  // A marker line: WordPress or a plugin may print something of its own first.
+  // stderr ignored: WooCommerce's order email finds no sendmail in the container.
+  const out = execFileSync('kubectl', ['exec', '-n', `store-${slug}`, 'deploy/store-wordpress', '-c', 'wordpress', '--', 'php', '-r', php], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  const m = /^ORDER (\d+) ([\d.]+)$/m.exec(out);
+  if (!m) throw new Error(`no order from ${slug}: ${out.slice(0, 200)}`);
+  return { id: m[1], total: Number(m[2]) };
 }
 // One chat turn as the admin; the tools it used, whether called directly or through gateway__call_tool.
 async function chat(text) {
@@ -126,6 +130,20 @@ try {
     must(own === 'REACHABLE' && toWp === 'BLOCKED' && toDb === 'BLOCKED' && toPg === 'BLOCKED' && secret('vdodaa') !== secret('vdodbb'), `own ${own}, B's WordPress ${toWp}, B's MySQL ${toDb}, Postgres ${toPg}`);
     return 'A reaches its own WordPress, not B\'s WordPress or MySQL, not Postgres; their secrets differ (compared by hash)';
   });
+  await check('guardrails: a ResourceQuota and a LimitRange in each store namespace', async () => {
+    const q = JSON.parse(sh('kubectl get resourcequota -n store-vdodaa tenant -o json'));
+    const l = JSON.parse(sh('kubectl get limitrange -n store-vdodaa tenant -o json'));
+    const c = l.spec.limits.find(x => x.type === 'Container'), v = l.spec.limits.find(x => x.type === 'PersistentVolumeClaim');
+    must(q.spec.hard.pods === '8' && q.spec.hard['limits.memory'] === '3Gi' && c?.max?.memory === '1Gi' && c?.default?.memory && v?.max?.storage === '5Gi',
+      `quota ${JSON.stringify(q.spec.hard)}; limits ${JSON.stringify(l.spec.limits)}`.slice(0, 300));
+    // A pod that passes restricted Pod Security, so only the LimitRange can refuse it (dry run: nothing is created).
+    const pod = { spec: { securityContext: { runAsNonRoot: true, runAsUser: 65534, seccompProfile: { type: 'RuntimeDefault' } },
+      containers: [{ name: 'x', image: 'busybox:1.37', securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] } },
+        resources: { requests: { cpu: '10m', memory: '16Mi' }, limits: { cpu: '1', memory: '2Gi' } } }] } };
+    const tooBig = sh(`kubectl run vdod-toobig -n store-vdodaa --image=busybox:1.37 --restart=Never --dry-run=server --overrides='${JSON.stringify(pod)}'`);
+    must(/maximum memory usage per Container is 1Gi/.test(tooBig), `a 2Gi container was not refused by the LimitRange: ${tooBig.slice(0, 200)}`);
+    return 'quota: 8 pods, 3Gi; limit range: at most 1 CPU / 1Gi per container (a 2Gi pod is refused), 5Gi per volume, defaults for the rest';
+  });
   await check('chat compares today\'s orders across two stores (P15)', async () => {
     const a = placeOrder('vdodaa', 1), b1 = placeOrder('vdodbb', 2), b2 = placeOrder('vdodbb', 1);
     const c = await chat('Compare today\'s orders in the stores vdodaa and vdodbb: for each store, how many orders came in today and their total.');
@@ -134,20 +152,6 @@ try {
     const totalB = b1.total + b2.total, words = c.answer.replace(/,/g, '');
     must(words.includes(String(a.total)) && words.includes(String(totalB)), `answer lacks ${a.total} (vdodaa) or ${totalB} (vdodbb): ${c.answer.slice(0, 300)}`);
     return `orders #${a.id} (vdodaa), #${b1.id} and #${b2.id} (vdodbb); chat called list_orders on both and gave totals ${a.total} and ${totalB}`;
-  });
-  await check('members manage their own stores; others are read-only (P14)', async () => {
-    const asMember = (await api('GET', '/api/stores', undefined, KEY_MEMBER)).body.stores?.find(s => s.slug === 'vdodaa');
-    must(asMember && !asMember.canManage && asMember.adminPasswordCommand === null, `member's view of an admin's store: ${JSON.stringify(asMember)?.slice(0, 160)}`);
-    const delOther = await api('DELETE', `/api/stores/${aa.id}?confirm=vdodaa`, undefined, KEY_MEMBER);
-    const retryOther = await api('POST', `/api/stores/${aa.id}/retry`, {}, KEY_MEMBER);
-    must(delOther.status === 403 && retryOther.status === 403, `member on an admin's store: delete ${delOther.status}, retry ${retryOther.status}`);
-    const made = await api('POST', '/api/stores', { slug: 'vdodmm', title: 'Member Store' }, KEY_MEMBER);
-    must(made.status === 200 && made.body.store?.mine && made.body.store.adminPasswordCommand, `member create: ${made.status} ${made.body.error ?? ''}`);
-    const byOther = await api('DELETE', `/api/stores/${made.body.store.id}?confirm=vdodmm`, undefined, KEY_MEMBER2);
-    must(byOther.status === 403, `another member deleting it: ${byOther.status}`);
-    const own = await api('DELETE', `/api/stores/${made.body.store.id}?confirm=vdodmm`, undefined, KEY_MEMBER);
-    must(own.status === 200, `the owner deleting it: ${own.status} ${own.body.error ?? ''}`);
-    return 'member sees an admin\'s store without actions or the password command, gets 403 on it; creates its own (with the command); another member 403; the owner deletes it';
   });
   await check(`the limit holds (${STORE_MAX} stores); a delete stops an install`, async () => {
     const existing = (await api('GET', '/api/stores')).body.stores.filter(s => s.state !== 'deleting').length;
@@ -196,6 +200,21 @@ try {
     must(Array.isArray(status.toolNames) && status.toolNames.some(n => n.startsWith('vdodaa__')) && !listed.length && !hits.length && control.length,
       `chat tools ${listed}; search for vdodbb ${hits}; control search for vdodaa ${control.length}`);
     return `chat's tools have vdodaa__* and no vdodbb__*; a tool search for "vdodbb orders" finds none`;
+  });
+  // After the delete: one test store left, so a member's own store fits even where max is 2 (the VPS).
+  await check('members manage their own stores; others are read-only (P14)', async () => {
+    const asMember = (await api('GET', '/api/stores', undefined, KEY_MEMBER)).body.stores?.find(s => s.slug === 'vdodaa');
+    must(asMember && !asMember.canManage && asMember.adminPasswordCommand === null, `member's view of an admin's store: ${JSON.stringify(asMember)?.slice(0, 160)}`);
+    const delOther = await api('DELETE', `/api/stores/${aa.id}?confirm=vdodaa`, undefined, KEY_MEMBER);
+    const retryOther = await api('POST', `/api/stores/${aa.id}/retry`, {}, KEY_MEMBER);
+    must(delOther.status === 403 && retryOther.status === 403, `member on an admin's store: delete ${delOther.status}, retry ${retryOther.status}`);
+    const made = await api('POST', '/api/stores', { slug: 'vdodmm', title: 'Member Store' }, KEY_MEMBER);
+    must(made.status === 200 && made.body.store?.mine && made.body.store.adminPasswordCommand, `member create: ${made.status} ${made.body.error ?? ''}`);
+    const byOther = await api('DELETE', `/api/stores/${made.body.store.id}?confirm=vdodmm`, undefined, KEY_MEMBER2);
+    must(byOther.status === 403, `another member deleting it: ${byOther.status}`);
+    const own = await api('DELETE', `/api/stores/${made.body.store.id}?confirm=vdodmm`, undefined, KEY_MEMBER);
+    must(own.status === 200, `the owner deleting it: ${own.status} ${own.body.error ?? ''}`);
+    return 'member sees an admin\'s store without actions or the password command, gets 403 on it; creates its own (with the command); another member 403; the owner deletes it';
   });
 } finally {
   await removeAll(TEST);

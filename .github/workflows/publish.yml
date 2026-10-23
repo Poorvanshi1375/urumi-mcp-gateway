@@ -1,0 +1,36 @@
+# Publish our images to GHCR on a version tag (v*), so the charts install without building:
+# helm upgrade --install ... -f values-prod.yaml -f values-ghcr.yaml (see the README).
+# Each image gets the tag's name, never "latest". Only the workflow's own GITHUB_TOKEN is used.
+# The packages take the repository's visibility (private while the repository is).
+name: publish
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+  packages: write
+jobs:
+  images:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        env:
+          TAG: ${{ github.ref_name }}
+          SOURCE: https://github.com/${{ github.repository }}
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          R=ghcr.io/$OWNER
+          build() { docker build --label "org.opencontainers.image.source=$SOURCE" --label "org.opencontainers.image.version=$TAG" -t "$R/urumi-$1:$TAG" "${@:2}"; }
+          build platform -f services/platform/Dockerfile services
+          build woo-mcp -f services/woo-mcp/Dockerfile services/woo-mcp
+          build ship-mcp -f services/ship-mcp/Dockerfile services/ship-mcp
+          build provisioner --build-arg "PLATFORM_IMAGE=$R/urumi-platform:$TAG" -f infra/images/provisioner/Dockerfile .
+          build mcp-bridge -f infra/images/mcp-bridge/Dockerfile infra/images/mcp-bridge
+          build woocommerce-zip -f infra/images/woocommerce-zip/Dockerfile infra/images/woocommerce-zip
+          for i in platform woo-mcp ship-mcp provisioner mcp-bridge woocommerce-zip; do docker push "$R/urumi-$i:$TAG"; done

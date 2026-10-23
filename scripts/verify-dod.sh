@@ -92,7 +92,7 @@ network_checks() {
   # kube-router adds a new pod's IP to the allow sets a few seconds after it starts: wait 8 s.
   probe() { # name, labels, targets
     kubectl run "$1" -n "$NS" --labels="vdod=probe,$2" --restart=Never --image=busybox:1.37 \
-      --overrides='{"spec":{"containers":[{"name":"'"$1"'","image":"busybox:1.37","command":["sh","-c","sleep 8; for t in '"$3"'; do h=${t%:*}; p=${t#*:}; if nc -w 3 -z $h $p; then echo $t REACHABLE; else echo $t BLOCKED; fi; done"],"resources":{"requests":{"cpu":"10m","memory":"16Mi"},"limits":{"cpu":"100m","memory":"32Mi"}}}]}}' >/dev/null
+      --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"runAsGroup":65534,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"'"$1"'","image":"busybox:1.37","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},"command":["sh","-c","sleep 8; for t in '"$3"'; do h=${t%:*}; p=${t#*:}; if nc -w 3 -z $h $p; then echo $t REACHABLE; else echo $t BLOCKED; fi; done"],"resources":{"requests":{"cpu":"10m","memory":"16Mi"},"limits":{"cpu":"100m","memory":"32Mi"}}}]}}' >/dev/null
   }
   # /metrics is on the gateway pods' own port (no Service, no Ingress): probe a pod IP directly.
   GW_POD_IP=$(kubectl get pod -n "$NS" -l app=platform,app.kubernetes.io/instance=platform --field-selector=status.phase=Running -o jsonpath='{.items[0].status.podIP}')
@@ -175,6 +175,13 @@ console.log(bad.length?"BAD "+bad.join(", "):"OK "+n+" containers");});')
 # every pod: no Kubernetes API token mounted.
 sec=$(kubectl get pods -n "$NS" -o json | node scripts/lib/pod-security.mjs)
 [[ $sec == OK* ]] && pass "non-root, no escalation, caps dropped, seccomp, no API token" "${sec#OK }" || fail "non-root, no escalation, caps dropped, seccomp, no API token" "${sec#BAD }"
+# Pod Security (G5): the namespace enforces "restricted", nothing running in it violates the level,
+# and the API server refuses a root pod there (dry run: nothing is created).
+psa=$(kubectl get ns "$NS" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}')
+viol=$(kubectl label --dry-run=server --overwrite ns "$NS" pod-security.kubernetes.io/enforce=restricted 2>&1 | grep -c "violate" || true)
+root=$(kubectl run vdod-root -n "$NS" --image=busybox:1.37 --restart=Never --dry-run=server -- true 2>&1 || true)
+if [ "$psa" = restricted ] && [ "$viol" = 0 ] && [[ $root == *"violates PodSecurity"* ]]; then pass "namespace enforces Pod Security restricted" "every running pod passes; a root pod is refused"
+else fail "namespace enforces Pod Security restricted" "label: ${psa:-none}; pods violating: $viol; root pod: ${root:0:120}"; fi
 # Append-only audit (AC): the role the gateway runs as cannot delete or rewrite audit rows, while
 # completing rows and the foreign-key nulling on deletes still work. Run as that role, in Postgres.
 APP_ROLE=$(kubectl get deploy -n "$NS" platform -o jsonpath='{.spec.template.spec.containers[?(@.name=="platform")].env[?(@.name=="PGUSER")].value}')

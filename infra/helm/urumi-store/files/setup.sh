@@ -82,6 +82,14 @@ while IFS='|' read -r sku name price; do
     wpu wc product create --sku="$sku" --name="$name" --regular_price="$price" --status=publish --porcelain >/dev/null
     log "  created $sku"
   fi
+  # Its photo, once: from the pre-baked image (URUMI-TSHIRT -> tshirt.jpg); kept if one is set already.
+  img="/plugin/images/$(echo "${sku#URUMI-}" | tr 'A-Z' 'a-z').jpg"
+  pid=$(wp post list --post_type=product --post_status=any --meta_key=_sku --meta_value="$sku" --field=ID | head -1)
+  if [ -f "$img" ] && [ -n "$pid" ] && [ -z "$(wp post meta get "$pid" _thumbnail_id 2>/dev/null)" ]; then
+    att=$(wpu media import "$img" --post_id="$pid" --title="$name" --porcelain)
+    wp post meta update "$pid" _thumbnail_id "$att" >/dev/null
+    log "  photo for $sku"
+  fi
 done < /setup/products.txt
 
 # The REST key belongs to a dedicated shop_manager user, not the administrator (least privilege;

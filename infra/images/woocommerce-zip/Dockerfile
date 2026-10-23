@@ -11,4 +11,6 @@ RUN wget -q -O /woocommerce.zip "https://downloads.wordpress.org/plugin/woocomme
 
 FROM busybox:1.37
 COPY --from=fetch /woocommerce.zip /plugin/woocommerce.zip
+# Photos for the seed products (product-images/SOURCES.md): set once by the store's setup Job.
+COPY product-images/*.jpg /plugin/images/
 USER 65534
