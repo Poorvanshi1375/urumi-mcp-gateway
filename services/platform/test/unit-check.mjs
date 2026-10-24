@@ -246,6 +246,16 @@ await check('SSRF: guarded fetch refuses before connecting', async () => {
   return 'localhost (lookup path) and 127.0.0.1 (literal path) refused; the server saw only the unguarded control request';
 });
 
+await check('permissions: a reload tells whether anything changed', async () => {
+  let rows = [{ serverPrefix: 'woo', tool: 'create_product', allowed: false }], confirm = [];
+  const db = { select: () => ({ from: () => ({ where: async () => rows, then: (ok, ko) => Promise.resolve(confirm).then(ok, ko) }) }) };
+  const p = new Permissions(db); await p.load();
+  const first = p.signature(); await p.load();
+  must(p.signature() === first, 'the same rules read again look changed');
+  rows = [{ serverPrefix: 'woo', tool: 'create_product', allowed: true }]; await p.load();
+  must(p.signature() !== first && p.allows('member', 'woo', 'create_product', false), 'a changed rule was not seen');
+  return 'same rules: unchanged (no client notification); a changed rule: changed, and applied';
+});
 await check('guarded fetch: one retry when the request was never sent', async () => {
   const net = await import('node:net');
   let conns = 0;
@@ -582,6 +592,20 @@ await check('P: CSV cells are quoted and formula-safe', async () => {
   const bad = cases.filter(([v, want]) => csvCell(v) !== want).map(([v, want]) => `${JSON.stringify(v)} -> ${csvCell(v)} (want ${want})`);
   must(!bad.length, bad.join('; '));
   return `${cases.length} cases: = + - @ tab get a leading quote; inner quotes doubled; null empty`;
+});
+
+await check('HSTS only over HTTPS; frames and sniffing refused on every response', async () => {
+  const { default: Fastify } = await import('fastify');
+  const { registerWeb } = await import('../src/web.ts');
+  const app = Fastify({ trustProxy: trustOneHop });
+  await registerWeb(app, '/nonexistent');   // no dashboard build: headers only
+  app.get('/x', async () => ({ ok: true }));
+  const https = await app.inject({ url: '/x', headers: { 'x-forwarded-proto': 'https' } });
+  const http = await app.inject({ url: '/x' });
+  await app.close();
+  must(https.headers['strict-transport-security'] === 'max-age=15552000' && !http.headers['strict-transport-security'], `https ${https.headers['strict-transport-security']}, http ${http.headers['strict-transport-security']}`);
+  must(http.headers['x-frame-options'] === 'DENY' && /frame-ancestors 'none'/.test(http.headers['content-security-policy']) && http.headers['x-content-type-options'] === 'nosniff', 'baseline headers missing');
+  return 'https: max-age=15552000; http: none; DENY, frame-ancestors none, nosniff on both';
 });
 
 await check('Q: req.ip is the address Traefik saw, never a forged one', async () => {

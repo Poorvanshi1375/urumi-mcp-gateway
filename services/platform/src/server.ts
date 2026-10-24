@@ -84,8 +84,18 @@ async function bootstrapWithRetry() {
   }
 }
 
-// Registry changes (CLI, dashboard, other replicas) arrive as Postgres NOTIFY; the health loop's
-// periodic reload is the fallback if this connection drops.
+// Everything a NOTIFY would have told us: the registry, permissions and pins, read again.
+function reloadShared(why: string) {
+  void manager.refresh().catch(() => {});
+  const before = perms.signature();   // clients are told to re-list only if something changed
+  void perms.load().then(() => { if (perms.signature() !== before) mcp.notify.toolsChanged(); }).catch(e => app.log.warn({ err: describeError(e), why }, 'permission reload failed'));
+  void pinning.load().then(() => manager.reapplyPins()).catch(e => app.log.warn({ err: describeError(e), why }, 'pin reload failed'));
+}
+
+// Registry, permission and pin changes (CLI, dashboard, other replicas) arrive as Postgres NOTIFY.
+// A notification sent while this connection is down is lost, so every (re)connect reads all of it
+// again once LISTEN is active; a periodic reload covers a connection that stalls without an error.
+let listenedBefore = false;
 async function listenForRegistryChanges() {
   const client = new pg.Client();
   let retrying = false;
@@ -111,6 +121,8 @@ async function listenForRegistryChanges() {
   try {
     await client.connect();
     await client.query(`LISTEN ${REGISTRY_CHANNEL}`);
+    if (listenedBefore) { app.log.info('registry LISTEN restored; reloading what may have been missed'); reloadShared('listen restored'); }
+    listenedBefore = true;
   } catch (e) {
     retry(e);
   }
@@ -217,5 +229,6 @@ void bootstrapWithRetry().then(() => {
     .then(rows => { if (rows.length) app.log.warn({ rows: rows.length }, 'audit rows left pending marked unknown'); })
     .catch(() => {}), 60_000).unref();
   void listenForRegistryChanges();
+  setInterval(() => reloadShared('periodic'), 60_000).unref();
   app.log.info('gateway ready');
 });

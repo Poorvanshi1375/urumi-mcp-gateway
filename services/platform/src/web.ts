@@ -9,7 +9,10 @@ const NOT_SPA = /^\/(api|mcp|healthz|readyz|\.well-known)(\/|$|\?)/;
 
 export async function registerWeb(app: FastifyInstance, dir = process.env.DASHBOARD_DIR ?? path.resolve('public')) {
   // Baseline browser hardening for every response.
-  app.addHook('onSend', async (_req, reply) => {
+  app.addHook('onSend', async (req, reply) => {
+    // Over HTTPS (the VPS), browsers keep using HTTPS for this host. Not on plain-HTTP local runs,
+    // and no includeSubDomains: the host may be a shared name such as <ip>.nip.io.
+    if (req.protocol === 'https') reply.header('strict-transport-security', 'max-age=15552000');
     reply.header('x-content-type-options', 'nosniff');
     reply.header('referrer-policy', 'same-origin');
     reply.header('x-frame-options', 'DENY');

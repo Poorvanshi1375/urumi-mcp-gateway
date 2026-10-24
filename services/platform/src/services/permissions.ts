@@ -33,6 +33,9 @@ export class Permissions {
   readonly memberDefault: MemberDefault;
   constructor(db: Db, memberDefault: MemberDefault = 'allow') { this.db = db; this.memberDefault = memberDefault; }
 
+  // What the rules are now, to tell whether a reload changed anything.
+  signature() { return JSON.stringify([[...this.rules].sort(), [...this.confirmRules].sort()]); }
+
   async load() {
     const rows = await this.db.select().from(toolPermissions).where(eq(toolPermissions.role, 'member'));
     this.rules = new Map(rows.map(r => [`${r.serverPrefix}\n${r.tool}`, r.allowed]));
