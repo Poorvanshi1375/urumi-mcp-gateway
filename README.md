@@ -65,16 +65,18 @@ Everything except DeepWiki and Gemini runs in the cluster, in namespace `urumi`.
 git clone <this repo> urumi-mcp-gateway && cd urumi-mcp-gateway
 make cluster                                   # k3d cluster "urumi-local": Traefik on :9080, NetworkPolicy enforced
 make secrets GEMINI_KEY_FILE=~/gemini.key FALLBACK_KEY_FILE=~/groq.key   # creates the Kubernetes Secrets (omit a key file to skip it)
-make install                                   # builds the 3 images, installs the store chart, then the platform chart
+make install                                   # builds our images, installs the store chart, then the platform chart
 make hooks                                     # optional: pre-commit check that refuses committed secrets
 ```
 
-`make install` takes about 5 minutes the first time (the store's setup Job downloads WooCommerce). `make up` runs all three steps.
+`make install` takes about 5 minutes the first time (it builds the images; the store's setup Job installs WordPress, WooCommerce from a pre-built image checked by SHA-256, and the sample products with their photos). `make up` runs all three steps.
 
 What each step does:
 - `scripts/cluster-up.sh` creates (or starts) the k3d cluster: k3s v1.35.5, one server and one agent node, Traefik published on host port 9080. k3s enforces NetworkPolicies itself (kube-router), so the charts' policies are real locally too. It also loads the third-party images from the host into the nodes, because pulls from inside k3d nodes are unreliable on Docker Desktop.
 - `scripts/secrets.sh` creates `store-secrets`, `platform-secrets` and `platform-llm` with random values. It never overwrites an existing value, because the databases on the volumes were created with them. The charts only reference these Secrets by name (`secrets.existingSecret`), so no secret is ever in git, in values files or in Helm's release history.
-- `make install` builds the images (tag = the last git commit of their sources), loads them into the nodes, and runs `helm upgrade --install` for both charts with `values-local.yaml`.
+- `make install` builds the images (the gateway with the dashboard, woo-mcp, ship-mcp, the provisioner, the stdio bridge and the WooCommerce zip; tag = the last git commit of their sources), loads them into the nodes, and runs `helm upgrade --install` for both charts with `values-local.yaml`.
+- **Without building:** each version tag (`v1.0.0`) publishes the same images to GHCR (`.github/workflows/publish.yml`); add `-f infra/helm/urumi-platform/values-ghcr.yaml` to the platform chart's `helm upgrade --install` to use them.
+- **After a Docker restart** the k3d nodes can come back with each other's IP addresses. Run `make install-platform` again: the provisioner's network rule names the API server's address, read at install time.
 
 ### Local domains
 
