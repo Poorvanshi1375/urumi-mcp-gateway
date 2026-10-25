@@ -6,24 +6,48 @@ A WooCommerce store on Kubernetes with a team MCP gateway in front of it. An adm
                       browser, Claude Code, Cursor, MCP Inspector
                                         |
                           Traefik Ingress (TLS on the VPS)
-                 +----------------------+-----------------------+
-                 |                                              |
-         store.<domain>                            app.<domain>  (/, /api, /mcp)
-                 |                                              |
-        +--------v--------+                      +--------------v---------------+
-        | WordPress +     |                      | platform (2+ replicas)        |
-        | WooCommerce     |<---- REST (OAuth) ---|  dashboard (React), /api,     |
-        +--------+--------+          ^           |  MCP gateway /mcp, chat agent |
-                 |                   |           +---+----------+-----------+----+
-        +--------v--------+   +------+------+        |          |           |
-        | MySQL (PVC)     |   |  woo-mcp    |<-------+     +----v-----+  +--v-----------+
-        +-----------------+   +-------------+  MCP        | ship-mcp |  | DeepWiki     |
-                                (ClusterIP only)          +----------+  | (public MCP) |
-                               platform ---> Postgres (PVC): users, keys, servers, audit
-                               platform ---> Gemini API (chat)
+                 +----------------------+------------------------+
+                 |                                               |
+          store.<domain>                            app.<domain>  (/, /api, /mcp)
+                 |                                               |
+        +--------v--------+                     +----------------v---------------+
+        | WordPress +     |                     | platform (2+ replicas,         |
+        | WooCommerce     |<--- REST (OAuth) ---|   no Kubernetes token)         |
+        +--------+--------+         ^           |  dashboard (React), /api,      |
+                 |                  |           |  MCP gateway /mcp, chat agent  |
+        +--------v--------+  +------+------+    +---+----------+------------+----+
+        | MySQL (PVC)     |  |  woo-mcp    |<-------+          |            |
+        +-----------------+  +-------------+   MCP       +-----v----+  +----v---------+
+                               (ClusterIP only)          | ship-mcp |  | DeepWiki     |
+                                                         +----------+  | (public MCP) |
+                                                                       +--------------+
+          platform ---> Postgres (PVC): users, key hashes, servers, audit, stores
+          platform ---> Gemini API, with Groq as fallback (chat)
+
+  Hosted MCP servers and bonus stores: the gateway only writes a row; the provisioner acts.
+
+        dashboard /api ------ writes a row ------> Postgres
+                                                       ^
+                                                       | claims rows (leases)
+                                          +------------+-----------------+
+                                          | provisioner: the only pod    |
+                                          | with a Kubernetes token      |
+                                          +------------+-----------------+
+                                                       | Kubernetes API, fenced by
+                                                       | RBAC + 5 admission policies
+                      +--------------------------------+-------------------------+
+                      |                                                          |
+  +-------------------v----------------+       +---------------------------------v--+
+  | namespace store-<name>             |       | namespace mcp-<prefix>             |
+  | (one per bonus store)              |       | (one per hosted server)            |
+  | WordPress, MySQL, its own woo-mcp; |       | the admin's image, or a stdio      |
+  | quota, LimitRange, default-deny    |       | server via our bridge; quota,      |
+  |                                    |       | default-deny                       |
+  +-------------------^----------------+       +---------------------------------^--+
+                      +----------------- MCP, only from the gateway -------------+
 ```
 
-Everything except DeepWiki and Gemini runs in the cluster, in namespace `urumi`. The MCP servers have no Ingress; NetworkPolicies let only the gateway reach them.
+Everything except DeepWiki and the chat models runs in the cluster: the store and the platform in namespace `urumi`, each bonus store in `store-<name>`, each hosted server in `mcp-<prefix>`. The MCP servers have no Ingress; NetworkPolicies let only the gateway reach them.
 
 | Component | Code | What it does |
 |---|---|---|
@@ -33,6 +57,9 @@ Everything except DeepWiki and Gemini runs in the cluster, in namespace `urumi`.
 | DeepWiki | external | A public MCP server (`https://mcp.deepwiki.com/mcp`), the third upstream |
 | platform | `services/platform`, `services/dashboard` | One Node service: the MCP gateway (`/mcp`), the dashboard API (`/api`), the chat agent, and the React dashboard |
 | Postgres | `infra/helm/urumi-platform` | Users, sessions, API key hashes, registered servers (credentials encrypted), permissions, audit and activity logs |
+| provisioner | `services/platform/src/provisioner.ts`, `infra/images/provisioner` | The only pod with a Kubernetes token: creates and removes hosted servers and bonus stores from rows the dashboard writes, fenced by RBAC and five admission policies ([details](docs/provisioner.md)) |
+| Hosted servers | `services/platform/src/provision/hosted.ts`, `infra/images/mcp-bridge` | An admin's MCP server image, run in its own namespace; stdio servers through our bridge |
+| Bonus stores | `services/platform/src/provision/stores.ts` | A whole WooCommerce store per namespace, from the same store chart, with its own woo-mcp |
 
 ## Contents
 
