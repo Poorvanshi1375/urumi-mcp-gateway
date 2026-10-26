@@ -2,6 +2,8 @@
 
 A WooCommerce store on Kubernetes with a team MCP gateway in front of it. An admin registers MCP servers once in a dashboard; every team member then reaches all of their tools through one MCP endpoint (Claude Code, Cursor, MCP Inspector) and through a chat agent in the dashboard. The same two Helm charts run on a laptop (k3d) and on a VPS (k3s), with only values changed.
 
+**Demo video (33 min, with chapters):** https://youtu.be/mW9fIbwzoZE. [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) links every requirement to the moment in the video that shows it.
+
 ```
                       browser, Claude Code, Cursor, MCP Inspector
                                         |
